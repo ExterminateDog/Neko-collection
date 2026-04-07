@@ -1,4 +1,8 @@
-# Neko Collection
+# 🐱 Neko Collection
+
+<p align="center">
+  <img src="frontend/assets/logo.png" alt="Neko Collection Logo" width="120">
+</p>
 
 [![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](https://github.com/your-username/neko-collection)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
