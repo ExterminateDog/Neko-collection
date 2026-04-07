@@ -1,0 +1,15 @@
+﻿{
+  "name": "neko-collection-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "build": "esbuild frontend/assets/app.jsx --bundle --format=iife --target=es2018 --minify --outfile=frontend/assets/app.js"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.10"
+  }
+}
