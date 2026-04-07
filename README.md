@@ -1,4 +1,4 @@
-# 🐱 Neko Collection
+# Neko Collection
 
 <p align="center">
   <img src="frontend/assets/logo.png" alt="Neko Collection Logo" width="120">
