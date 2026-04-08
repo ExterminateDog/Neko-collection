@@ -682,6 +682,7 @@ body.dark-mode .readonly-tip {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--muted);
+  user-select: none;
 }
 
 .volume-table-head .volume-cell {
@@ -968,13 +969,18 @@ body.dark-mode .readonly-tip {
   border-color: #fecaca;
 }
 
-label {
+label, .form-group {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
   font-size: 0.875rem;
   font-weight: 600;
   color: var(--text-soft);
+}
+
+.form-label {
+  display: block;
+  margin-bottom: 0;
 }
 
 input, select, textarea {
@@ -1106,6 +1112,88 @@ input:focus, select:focus, textarea:focus {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: 1.25rem;
+}
+
+.form-fields-col label.full, .form-fields-col .form-group.full {
+  grid-column: 1 / -1;
+}
+
+/* Option Group (Expanded Selects) */
+.option-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+}
+
+.option-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.875rem;
+  border: 1.5px solid var(--line);
+  background: var(--surface);
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--text-soft);
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  white-space: nowrap;
+}
+
+.option-item:hover {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+  color: var(--brand);
+}
+
+.option-item.active {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: white;
+  box-shadow: 0 4px 10px rgba(255, 133, 161, 0.3);
+}
+
+.option-item .option-icon {
+  font-size: 1.1rem;
+  display: flex;
+  align-items: center;
+}
+
+/* Private Toggle Button */
+.private-toggle-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border: 2px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-weight: 700;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.private-toggle-btn.active {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #ef4444;
+}
+
+body.dark-mode .private-toggle-btn.active {
+  background: #451a1a;
+  border-color: #7f1d1d;
+  color: #f87171;
+}
+
+.private-toggle-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
 }
 
 @media (max-width: 640px) {

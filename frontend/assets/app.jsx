@@ -16,6 +16,41 @@ const PLATFORM_ICONS = {
   闲鱼: <img src="assets/Xianyu.png" className="platform-icon" alt="Xianyu" />,
   其他: "🏷️"
 };
+const CATEGORY_ICONS = {
+  手办: "🧸",
+  书籍: "📚",
+  周边: "✨",
+  其他: "📦"
+};
+const STATUS_ICONS = {
+  owned: "✅",
+  preorder: "✴️",
+  wishlist: "❌"
+};
+const CURRENCY_ICONS = {
+  CNY: "￥",
+  JPY: "¥",
+  TWD: "NT$",
+  HKD: "$"
+};
+
+function OptionGroup({ options, value, onChange, icons = {}, labelMap = {}, className = "", hideIcons = false }) {
+  return (
+    <div className={`option-group ${className}`}>
+      {options.map(opt => (
+        <button
+          key={opt}
+          type="button"
+          className={`option-item ${value === opt ? "active" : ""}`}
+          onClick={() => onChange(opt)}
+        >
+          {!hideIcons && <span className="option-icon">{icons[opt] || ""}</span>}
+          <span className="option-label">{labelMap[opt] || (hideIcons ? icons[opt] : opt)}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
 
 function formatNumber(value) {
   if (value === null || value === undefined || value === "") return "-";
@@ -85,10 +120,10 @@ function fileToDataUrl(file) {
 }
 
 function initialItemForm() {
-  return { name: "", category: "手办", status: "owned", platform: "", purchase_price: "", list_price_amount: "", list_price_currency: "CNY", book_edition_type: "普通版", author: "", publisher: "", purchase_date: "", tags: [], notes: "", image_data: null, is_series: true, is_private: false };
+  return { name: "", category: "手办", status: "owned", platform: "", purchase_price: "", purchase_currency: "CNY", list_price_amount: "", list_price_currency: "CNY", book_edition_type: "普通版", author: "", publisher: "", purchase_date: "", tags: [], notes: "", image_data: null, is_series: true, is_private: false };
 }
 function initialVolumeForm() {
-  return { volume_title: "", edition_type: "普通版", purchase_status: "owned", platform: "", purchase_price: "", list_price_amount: "", list_price_currency: "CNY", purchase_date: "", notes: "", cover_image_data: null };
+  return { volume_title: "", edition_type: "普通版", purchase_status: "owned", platform: "", purchase_price: "", purchase_currency: "CNY", list_price_amount: "", list_price_currency: "CNY", purchase_date: "", notes: "", cover_image_data: null };
 }
 function itemToPayload(item) {
   const name = item.name;
@@ -96,7 +131,7 @@ function itemToPayload(item) {
   return {
     name: name, category: item.category, 
     series_name: item.category === "书籍" ? name : null, 
-    status: item.status, platform: item.platform || "", purchase_price: toNumberOrNull(item.purchase_price), purchase_currency: "CNY", list_price_amount: toNumberOrNull(item.list_price_amount), list_price_currency: String(item.list_price_currency || "CNY").toUpperCase(), purchase_date: item.purchase_date || "", book_edition_type: item.book_edition_type || "", author: item.author || "", publisher: item.publisher || "", tags: item.tags || [], notes: item.notes || "", image_data: item.image_data || null, sort_order: item.sort_order || 0, book_volumes: item.book_volumes || [], is_series: isSeries, is_private: item.is_private || false
+    status: item.status, platform: item.platform || "", purchase_price: toNumberOrNull(item.purchase_price), purchase_currency: item.purchase_currency || "CNY", list_price_amount: toNumberOrNull(item.list_price_amount), list_price_currency: String(item.list_price_currency || "CNY").toUpperCase(), purchase_date: item.purchase_date || "", book_edition_type: item.book_edition_type || "", author: item.author || "", publisher: item.publisher || "", tags: item.tags || [], notes: item.notes || "", image_data: item.image_data || null, sort_order: item.sort_order || 0, book_volumes: item.book_volumes || [], is_series: isSeries, is_private: item.is_private || false
   };
 }
 
@@ -696,53 +731,104 @@ function App() {
                   {itemForm.image_data && <button type="button" className="btn danger small" onClick={() => setItemForm({ ...itemForm, image_data: null })} style={{ width: "100%", marginTop: "0.5rem" }}>移除图片</button>}
                 </div>
                 <div className="form-fields-col">
+                  {/* 第一组: 基础信息 (独立占行) */}
                   <label className="full">名称 / 系列名<input type="text" value={itemForm.name} onChange={e => setItemForm({ ...itemForm, name: e.target.value })} required /></label>
-                  <label>分类<select value={itemForm.category} onChange={e => setItemForm({ ...itemForm, category: e.target.value })}>{categoryOptions.map(c => <option key={c} value={c}>{c}</option>)}</select></label>
+                  <div className="form-group full">
+                    <span className="form-label">分类</span>
+                    <OptionGroup
+                      options={categoryOptions}
+                      value={itemForm.category}
+                      onChange={val => setItemForm({ ...itemForm, category: val })}
+                      icons={CATEGORY_ICONS}
+                    />
+                  </div>
                   {itemForm.category === "书籍" && (
-                    <label>是否系列
-                      <select value={itemForm.is_series ? "1" : "0"} onChange={e => setItemForm({ ...itemForm, is_series: e.target.value === "1" })}>
-                        <option value="1">是 (具有多个分册)</option>
-                        <option value="0">否 (单本书籍)</option>
-                      </select>
-                    </label>
+                    <div className="form-group full">
+                      <span className="form-label">是否系列</span>
+                      <div className="option-group">
+                        <button type="button" className={`option-item ${itemForm.is_series ? "active" : ""}`} onClick={() => setItemForm({ ...itemForm, is_series: true })}>是 (具有多个分册)</button>
+                        <button type="button" className={`option-item ${!itemForm.is_series ? "active" : ""}`} onClick={() => setItemForm({ ...itemForm, is_series: false })}>否 (单本书籍)</button>
+                      </div>
+                    </div>
                   )}
+
+                  {/* 属性过滤: 系列书籍隐藏状态、平台、定价、日期 */}
                   {!(itemForm.category === "书籍" && itemForm.is_series) && (
                     <>
-                      <label>状态<select value={itemForm.status} onChange={e => {
-                        const newStatus = e.target.value;
-                        const update = { ...itemForm, status: newStatus };
-                        if (newStatus === "wishlist") { update.purchase_price = ""; update.purchase_date = ""; }
-                        setItemForm(update);
-                      }}><option value="owned">已购</option><option value="preorder">预订</option><option value="wishlist">未购</option></select></label>
-                      <label>购买价格 (CNY)<input type="number" step="0.01" value={itemForm.purchase_price} onChange={e => setItemForm({ ...itemForm, purchase_price: e.target.value })} disabled={itemForm.status === "wishlist"} /></label>
-                      <label>商品定价
-                        <div style={{ display: "flex", gap: "0.5rem" }}>
-                          <input type="number" step="0.01" style={{ flex: 1 }} value={itemForm.list_price_amount} onChange={e => setItemForm({ ...itemForm, list_price_amount: e.target.value })} placeholder="金额" />
-                          <select style={{ width: "80px" }} value={itemForm.list_price_currency} onChange={e => setItemForm({ ...itemForm, list_price_currency: e.target.value })}>{PRICE_CURRENCY_OPTIONS.map(c => <option key={c} value={c}>{c}</option>)}</select>
-                        </div>
-                      </label>
-                      <label>购买平台<select value={itemForm.platform} onChange={e => setItemForm({ ...itemForm, platform: e.target.value })}><option value="">请选择</option>{PLATFORM_OPTIONS.map(p => <option key={p} value={p}>{p}</option>)}</select></label>
+                      <div className="form-group full">
+                        <span className="form-label">状态</span>
+                        <OptionGroup
+                          options={["owned", "preorder", "wishlist"]}
+                          value={itemForm.status}
+                          onChange={val => {
+                            const update = { ...itemForm, status: val };
+                            if (val === "wishlist") { update.purchase_price = ""; update.purchase_date = ""; }
+                            setItemForm(update);
+                          }}
+                          icons={STATUS_ICONS}
+                          labelMap={{ owned: "已购", preorder: "预订", wishlist: "未购" }}
+                        />
+                      </div>
+                      <div className="form-group full">
+                        <span className="form-label">购买平台</span>
+                        <OptionGroup
+                          options={PLATFORM_OPTIONS}
+                          value={itemForm.platform}
+                          onChange={val => setItemForm({ ...itemForm, platform: val })}
+                          icons={PLATFORM_ICONS}
+                        />
+                      </div>
                     </>
                   )}
-                  {itemForm.category === "书籍" ? (
+
+                  {/* 购买价格: 系列书籍隐藏，其他显示 */}
+                  {!(itemForm.category === "书籍" && itemForm.is_series) && (
+                    <div className="form-group full">
+                      <span className="form-label">购买价格</span>
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+                        <input type="number" step="0.01" style={{ flex: "1 1 120px" }} value={itemForm.purchase_price} onChange={e => setItemForm({ ...itemForm, purchase_price: e.target.value })} disabled={itemForm.status === "wishlist"} placeholder="金额" />
+                        <OptionGroup
+                          options={PRICE_CURRENCY_OPTIONS}
+                          value={itemForm.purchase_currency}
+                          onChange={val => setItemForm({ ...itemForm, purchase_currency: val })}
+                          icons={CURRENCY_ICONS}
+                          labelMap={{ CNY: "￥CNY", JPY: "¥JPY", TWD: "NT$TWD", HKD: "$HKD" }}
+                          hideIcons={true}
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {!(itemForm.category === "书籍" && itemForm.is_series) && (
+                    <div className="form-group full">
+                      <span className="form-label">商品定价</span>
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+                        <input type="number" step="0.01" style={{ flex: "1 1 120px" }} value={itemForm.list_price_amount} onChange={e => setItemForm({ ...itemForm, list_price_amount: e.target.value })} placeholder="金额" />
+                        <OptionGroup
+                          options={PRICE_CURRENCY_OPTIONS}
+                          value={itemForm.list_price_currency}
+                          onChange={val => setItemForm({ ...itemForm, list_price_currency: val })}
+                          icons={CURRENCY_ICONS}
+                          labelMap={{ CNY: "￥CNY", JPY: "¥JPY", TWD: "NT$TWD", HKD: "$HKD" }}
+                          hideIcons={true}
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 书籍特定属性 */}
+                  {itemForm.category === "书籍" && (
                     <>
                       {!itemForm.is_series && (
                         <label>版本类型<select value={itemForm.book_edition_type} onChange={e => setItemForm({ ...itemForm, book_edition_type: e.target.value })}><option value="">请选择</option>{BOOK_EDITION_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}</select></label>
                       )}
                       <label>作者<input type="text" value={itemForm.author || ""} onChange={e => setItemForm({ ...itemForm, author: e.target.value })} /></label>
                       <label>出版社<input type="text" value={itemForm.publisher || ""} onChange={e => setItemForm({ ...itemForm, publisher: e.target.value })} /></label>
-                      {!itemForm.is_series && itemForm.status !== "wishlist" && (
-                        <label>购买日期 (必填)
-                          <input
-                            type="date"
-                            value={itemForm.purchase_date}
-                            onChange={e => setItemForm({ ...itemForm, purchase_date: e.target.value })}
-                            required={itemForm.status === "owned" || itemForm.status === "preorder"}
-                          />
-                        </label>
-                      )}
                     </>
-                  ) : (itemForm.status !== "wishlist" && (
+                  )}
+
+                  {/* 日期与标签并列 */}
+                  {!(itemForm.category === "书籍" && itemForm.is_series) && itemForm.status !== "wishlist" ? (
                     <label>购买日期 (必填)
                       <input
                         type="date"
@@ -751,9 +837,10 @@ function App() {
                         required={itemForm.status === "owned" || itemForm.status === "preorder"}
                       />
                     </label>
-                  ))}
-                  <div className="full">
-                    <label>标签 (输入后回车添加)</label>
+                  ) : <div style={{ display: "none" }}></div>}
+                  
+                  <div className="form-group">
+                    <span className="form-label">标签 (输入后回车添加)</span>
                     <div className="tag-input-container">
                       {(itemForm.tags || []).map((t, i) => (
                         <span key={i} className="tag-capsule">{t}<span className="tag-remove" onClick={() => setItemForm({ ...itemForm, tags: itemForm.tags.filter((_, idx) => idx !== i) })}>×</span></span>
@@ -778,10 +865,19 @@ function App() {
                       />
                     </div>
                   </div>
+
+                  {/* 备注独立占行 */}
                   <label className="full">备注<textarea rows="2" value={itemForm.notes} onChange={e => setItemForm({ ...itemForm, notes: e.target.value })}></textarea></label>
-                  <div className="full" style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginTop: "0.5rem" }}>
-                    <input type="checkbox" id="is_private_checkbox" checked={itemForm.is_private} onChange={e => setItemForm({ ...itemForm, is_private: e.target.checked })} style={{ width: "auto" }} />
-                    <label htmlFor="is_private_checkbox" style={{ margin: 0, cursor: "pointer", fontWeight: "600" }}>🔒 标记为私密 (仅在私密模式下显示)</label>
+                  
+                  {/* 私密模式按钮 */}
+                  <div className="full" style={{ marginTop: "0.5rem" }}>
+                    <button
+                      type="button"
+                      className={`private-toggle-btn ${itemForm.is_private ? "active" : ""}`}
+                      onClick={() => setItemForm({ ...itemForm, is_private: !itemForm.is_private })}
+                    >
+                      {itemForm.is_private ? "🔒 私密藏品" : "🔓 公开藏品"}
+                    </button>
                   </div>
                 </div>
               </div>
@@ -940,23 +1036,60 @@ function App() {
                 </div>
                 <div className="form-fields-col">
                   <label className="full">分册名<input type="text" value={volumeForm.volume_title} onChange={e => setVolumeForm({ ...volumeForm, volume_title: e.target.value })} required /></label>
-                  <label>版本类型<select value={volumeForm.edition_type} onChange={e => setVolumeForm({ ...volumeForm, edition_type: e.target.value })}>{BOOK_EDITION_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}</select></label>
-                  <label>购买状态<select value={volumeForm.purchase_status} onChange={e => {
-                    const newStatus = e.target.value;
-                    const update = { ...volumeForm, purchase_status: newStatus };
-                    if (newStatus === "wishlist") { update.purchase_price = ""; update.purchase_date = ""; }
-                    setVolumeForm(update);
-                  }}><option value="owned">已购</option><option value="preorder">预订</option><option value="wishlist">未购</option></select></label>
-                  <label>购买价格 (CNY)<input type="number" step="0.01" value={volumeForm.purchase_price} onChange={e => setVolumeForm({ ...volumeForm, purchase_price: e.target.value })} disabled={volumeForm.purchase_status === "wishlist"} /></label>
-                  <label>商品定价
-                    <div style={{ display: "flex", gap: "0.5rem" }}>
-                      <input type="number" step="0.01" style={{ flex: 1 }} value={volumeForm.list_price_amount} onChange={e => setVolumeForm({ ...volumeForm, list_price_amount: e.target.value })} placeholder="金额" />
-                      <select style={{ width: "80px" }} value={volumeForm.list_price_currency} onChange={e => setVolumeForm({ ...volumeForm, list_price_currency: e.target.value })}>{PRICE_CURRENCY_OPTIONS.map(c => <option key={c} value={c}>{c}</option>)}</select>
+                  <label className="full">版本类型<select value={volumeForm.edition_type} onChange={e => setVolumeForm({ ...volumeForm, edition_type: e.target.value })}>{BOOK_EDITION_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}</select></label>
+                  <div className="form-group full">
+                    <span className="form-label">购买状态</span>
+                    <OptionGroup
+                      options={["owned", "preorder", "wishlist"]}
+                      value={volumeForm.purchase_status}
+                      onChange={val => {
+                        const update = { ...volumeForm, purchase_status: val };
+                        if (val === "wishlist") { update.purchase_price = ""; update.purchase_date = ""; }
+                        setVolumeForm(update);
+                      }}
+                      icons={STATUS_ICONS}
+                      labelMap={{ owned: "已购", preorder: "预订", wishlist: "未购" }}
+                    />
+                  </div>
+                  <div className="form-group full">
+                    <span className="form-label">购买价格</span>
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+                      <input type="number" step="0.01" style={{ flex: "1 1 120px" }} value={volumeForm.purchase_price} onChange={e => setVolumeForm({ ...volumeForm, purchase_price: e.target.value })} disabled={volumeForm.purchase_status === "wishlist"} placeholder="金额" />
+                      <OptionGroup
+                        options={PRICE_CURRENCY_OPTIONS}
+                        value={volumeForm.purchase_currency}
+                        onChange={val => setVolumeForm({ ...volumeForm, purchase_currency: val })}
+                        icons={CURRENCY_ICONS}
+                        labelMap={{ CNY: "￥CNY", JPY: "¥JPY", TWD: "NT$TWD", HKD: "$HKD" }}
+                        hideIcons={true}
+                      />
                     </div>
-                  </label>
-                  <label>购买平台<select value={volumeForm.platform} onChange={e => setVolumeForm({ ...volumeForm, platform: e.target.value })}><option value="">请选择</option>{PLATFORM_OPTIONS.map(p => <option key={p} value={p}>{p}</option>)}</select></label>
+                  </div>
+                  <div className="form-group full">
+                    <span className="form-label">商品定价</span>
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+                      <input type="number" step="0.01" style={{ flex: "1 1 120px" }} value={volumeForm.list_price_amount} onChange={e => setVolumeForm({ ...volumeForm, list_price_amount: e.target.value })} placeholder="金额" />
+                      <OptionGroup
+                        options={PRICE_CURRENCY_OPTIONS}
+                        value={volumeForm.list_price_currency}
+                        onChange={val => setVolumeForm({ ...volumeForm, list_price_currency: val })}
+                        icons={CURRENCY_ICONS}
+                        labelMap={{ CNY: "￥CNY", JPY: "¥JPY", TWD: "NT$TWD", HKD: "$HKD" }}
+                        hideIcons={true}
+                      />
+                    </div>
+                  </div>
+                  <div className="form-group full">
+                    <span className="form-label">购买平台</span>
+                    <OptionGroup
+                      options={PLATFORM_OPTIONS}
+                      value={volumeForm.platform}
+                      onChange={val => setVolumeForm({ ...volumeForm, platform: val })}
+                      icons={PLATFORM_ICONS}
+                    />
+                  </div>
                   {volumeForm.purchase_status !== "wishlist" && (
-                    <label>购买日期 (必填)
+                    <label className="full">购买日期 (必填)
                       <input
                         type="date"
                         value={volumeForm.purchase_date}

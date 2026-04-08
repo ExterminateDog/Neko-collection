@@ -1,19 +1,24 @@
 
+import base64
+import binascii
 import hashlib
 import json
 import os
 import secrets
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from urllib.request import Request, urlopen
 
 HOST = os.environ.get("NEKO_HOST", "127.0.0.1")
 PORT = int(os.environ.get("NEKO_PORT", "8765"))
 SCRIPT_DIR = Path(__file__).resolve().parent
 DB_PATH = SCRIPT_DIR / "neko_collection.db"
 FRONTEND_DIR = SCRIPT_DIR.parent / "frontend"
+UPLOADS_DIR = FRONTEND_DIR / "uploads"
+UPLOADS_URL_PREFIX = "/uploads/"
 
 DEFAULT_ADMIN_USERNAME = os.environ.get("NEKO_ADMIN_USERNAME", "admin")
 DEFAULT_ADMIN_PASSWORD = os.environ.get("NEKO_ADMIN_PASSWORD", "neko12345")
@@ -25,6 +30,14 @@ DEFAULT_RATES = {"CNY": 1.0, "JPY": 0.048, "TWD": 0.225, "HKD": 0.92}
 ALLOWED_CURRENCIES = set(DEFAULT_RATES.keys())
 BOOK_EDITIONS = {"首刷限定版", "首刷版", "特装版", "普通版"}
 ALLOWED_STATUSES = {"owned", "preorder", "wishlist"}
+IMAGE_EXTENSION_MAP = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/bmp": ".bmp",
+}
 
 
 def recreate_collections_with_new_status_constraint(conn: sqlite3.Connection) -> None:
@@ -86,7 +99,7 @@ def now_utc() -> datetime:
 
 
 def now_iso() -> str:
-    return now_utc().isoformat()
+    return now_utc().date().isoformat()
 
 
 def hash_password(password: str) -> str:
@@ -107,6 +120,7 @@ def ensure_column(conn: sqlite3.Connection, table: str, definition: str) -> None
 
 
 def init_db() -> None:
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     with get_conn() as conn:
         conn.execute(
             """
@@ -206,6 +220,142 @@ def init_db() -> None:
                 "INSERT INTO users(username, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?)",
                 (DEFAULT_ADMIN_USERNAME, hash_password(DEFAULT_ADMIN_PASSWORD), ts, ts),
             )
+        migrate_inline_images(conn)
+        compact_stored_dates(conn)
+
+
+def image_extension_for_mime(content_type: str) -> str:
+    return IMAGE_EXTENSION_MAP.get(str(content_type or "").lower().strip(), ".bin")
+
+
+def save_image_bytes(data: bytes, content_type: str) -> str:
+    if len(data) > MAX_IMAGE_DATA_LENGTH:
+        raise ValueError("鍥剧墖杩囧ぇ锛岃鍘嬬缉鍚庡啀涓婁紶")
+    ext = image_extension_for_mime(content_type)
+    if ext == ".bin":
+        raise ValueError("鍥剧墖鏍煎紡涓嶆敮鎸?")
+    digest = hashlib.sha256(data).hexdigest()
+    filename = f"{digest}{ext}"
+    target = UPLOADS_DIR / filename
+    if not target.exists():
+        target.write_bytes(data)
+    return f"{UPLOADS_URL_PREFIX}{filename}"
+
+
+def persist_data_url_image(image_data: str) -> str:
+    text = str(image_data or "").strip()
+    if len(text) > MAX_IMAGE_DATA_LENGTH:
+        raise ValueError("鍥剧墖杩囧ぇ锛岃鍘嬬缉鍚庡啀涓婁紶")
+    if not text.startswith("data:image/"):
+        raise ValueError("鍥剧墖鏍煎紡涓嶆敮鎸?")
+    try:
+        header, encoded = text.split(",", 1)
+    except ValueError as exc:
+        raise ValueError("鍥剧墖鏍煎紡涓嶆敮鎸?") from exc
+    if ";base64" not in header:
+        raise ValueError("鍥剧墖鏍煎紡涓嶆敮鎸?")
+    content_type = header[5:].split(";", 1)[0].strip().lower()
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise ValueError("鍥剧墖鏍煎紡涓嶆敮鎸?") from exc
+    return save_image_bytes(data, content_type)
+
+
+def is_uploaded_image_path(value) -> bool:
+    text = str(value or "").strip()
+    if not text.startswith(UPLOADS_URL_PREFIX):
+        return False
+    filename = text[len(UPLOADS_URL_PREFIX):]
+    return bool(filename) and "/" not in filename and "\\" not in filename
+
+
+def migrate_inline_images(conn: sqlite3.Connection) -> None:
+    rows = conn.execute("SELECT id, image_data, book_volumes_json FROM collections").fetchall()
+    for row in rows:
+        changed = False
+        image_data = row["image_data"]
+        if image_data and str(image_data).startswith("data:image/"):
+            image_data = persist_data_url_image(image_data)
+            changed = True
+
+        volumes_text = row["book_volumes_json"] or ""
+        try:
+            volumes = json.loads(volumes_text) if volumes_text else []
+        except json.JSONDecodeError:
+            volumes = []
+        migrated_volumes = []
+        for volume in volumes:
+            if isinstance(volume, dict) and volume.get("cover_image_data") and str(volume.get("cover_image_data")).startswith("data:image/"):
+                volume = dict(volume)
+                volume["cover_image_data"] = persist_data_url_image(volume.get("cover_image_data"))
+                changed = True
+            migrated_volumes.append(volume)
+
+        if changed:
+            conn.execute(
+                "UPDATE collections SET image_data=?, book_volumes_json=? WHERE id=?",
+                (
+                    image_data,
+                    json.dumps(migrated_volumes, ensure_ascii=False) if migrated_volumes else None,
+                    row["id"],
+                ),
+            )
+
+
+def compact_date_text(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return text[:10]
+
+
+def compact_stored_dates(conn: sqlite3.Connection) -> None:
+    for table, columns in {
+        "collections": [
+            "purchase_date",
+            "created_at",
+            "updated_at",
+            "purchase_fx_rate_timestamp",
+            "list_fx_rate_timestamp",
+        ],
+        "exchange_rates": ["updated_at"],
+        "users": ["created_at", "updated_at"],
+        "sessions": ["created_at", "expires_at"],
+    }.items():
+        for column in columns:
+            conn.execute(
+                f"UPDATE {table} SET {column}=substr({column}, 1, 10) "
+                f"WHERE {column} IS NOT NULL AND length({column}) > 10"
+            )
+
+    rows = conn.execute("SELECT id, book_volumes_json FROM collections WHERE book_volumes_json IS NOT NULL").fetchall()
+    for row in rows:
+        raw = row["book_volumes_json"]
+        try:
+            volumes = json.loads(raw) if raw else []
+        except json.JSONDecodeError:
+            continue
+
+        changed = False
+        normalized = []
+        for volume in volumes:
+            if not isinstance(volume, dict):
+                normalized.append(volume)
+                continue
+            next_volume = dict(volume)
+            for key in ("purchase_date", "purchase_fx_rate_timestamp", "list_fx_rate_timestamp"):
+                compacted = compact_date_text(next_volume.get(key))
+                if compacted != next_volume.get(key):
+                    next_volume[key] = compacted
+                    changed = True
+            normalized.append(next_volume)
+
+        if changed:
+            conn.execute(
+                "UPDATE collections SET book_volumes_json=? WHERE id=?",
+                (json.dumps(normalized, ensure_ascii=False), row["id"]),
+            )
 
 
 def parse_float_or_none(value):
@@ -230,6 +380,19 @@ def normalize_image_data(image_data, existing=None):
     return text
 
 
+def normalize_image_reference(image_data, existing=None):
+    if image_data is None:
+        return existing
+    text = str(image_data).strip()
+    if not text:
+        return None
+    if text.startswith("data:image/"):
+        return persist_data_url_image(text)
+    if is_uploaded_image_path(text):
+        return text
+    raise ValueError("鍥剧墖鏍煎紡涓嶆敮鎸?")
+
+
 def get_rates_map(conn: sqlite3.Connection) -> dict:
     return {
         row["currency"]: {"rate": float(row["rate_to_cny"]), "updated_at": row["updated_at"]}
@@ -244,7 +407,7 @@ def convert_amount(amount, currency, rates_map):
     if not entry:
         return None, None, None
     rate = float(entry["rate"])
-    return round(amount * rate, 2), rate, entry["updated_at"]
+    return round(amount * rate, 2), rate, compact_date_text(entry["updated_at"])
 
 
 def normalize_book_volumes(payload_volumes, rates_map, existing_volumes):
@@ -272,7 +435,7 @@ def normalize_book_volumes(payload_volumes, rates_map, existing_volumes):
         out.append({
             "volume_title": title,
             "edition_type": str(raw.get("edition_type", "")).strip() or None,
-            "cover_image_data": normalize_image_data(raw.get("cover_image_data"), raw.get("cover_image_data")),
+            "cover_image_data": normalize_image_reference(raw.get("cover_image_data"), raw.get("cover_image_data")),
             "platform": str(raw.get("platform", "")).strip() or None,
             "purchase_status": purchase_status,
             "purchase_price": pp,
@@ -285,7 +448,7 @@ def normalize_book_volumes(payload_volumes, rates_map, existing_volumes):
             "list_price_cny": lp_cny,
             "list_fx_rate_to_cny": lp_rate,
             "list_fx_rate_timestamp": lp_ts,
-            "purchase_date": str(raw.get("purchase_date", "")).strip() or None,
+            "purchase_date": compact_date_text(raw.get("purchase_date")),
             "notes": str(raw.get("notes", "")).strip() or None,
             "sort_order": idx,
         })
@@ -335,9 +498,9 @@ def normalize_item_payload(payload: dict, rates_map: dict, existing_item=None) -
         "purchase_fx_rate_timestamp": purchase_ts, "list_price_amount": list_price_amount,
         "list_price_currency": list_price_currency, "list_price_cny": list_price_cny,
         "list_fx_rate_to_cny": list_rate, "list_fx_rate_timestamp": list_ts,
-        "book_edition_type": book_edition_type, "purchase_date": str(payload.get("purchase_date", "")).strip() or None,
+        "book_edition_type": book_edition_type, "purchase_date": compact_date_text(payload.get("purchase_date")),
         "tags": tags_text, "notes": str(payload.get("notes", "")).strip() or None,
-        "image_data": normalize_image_data(payload.get("image_data", None), existing_item.get("image_data")),
+        "image_data": normalize_image_reference(payload.get("image_data", None), existing_item.get("image_data")),
         "book_volumes_json": book_volumes_json, "sort_order": sort_order,
         "author": str(payload.get("author", "")).strip() or None,
         "publisher": str(payload.get("publisher", "")).strip() or None,
@@ -385,6 +548,52 @@ def row_to_item(row: sqlite3.Row) -> dict:
         "total_spent_cny": round(total, 2), "volume_count": len(vols),
         "is_series": bool(row["is_series"]), "is_private": bool(row["is_private"]),
     }
+
+
+def collect_image_refs(image_data=None, book_volumes=None):
+    refs = set()
+    if image_data and is_uploaded_image_path(image_data):
+        refs.add(str(image_data).strip())
+    for volume in book_volumes or []:
+        if not isinstance(volume, dict):
+            continue
+        cover = volume.get("cover_image_data")
+        if cover and is_uploaded_image_path(cover):
+            refs.add(str(cover).strip())
+    return refs
+
+
+def image_ref_is_still_used(conn: sqlite3.Connection, image_path: str) -> bool:
+    rows = conn.execute("SELECT image_data, book_volumes_json FROM collections").fetchall()
+    for row in rows:
+        if row["image_data"] == image_path:
+            return True
+        raw = row["book_volumes_json"] or ""
+        if not raw:
+            continue
+        try:
+            volumes = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        for volume in volumes:
+            if isinstance(volume, dict) and volume.get("cover_image_data") == image_path:
+                return True
+    return False
+
+
+def delete_unused_uploaded_images(conn: sqlite3.Connection, image_paths):
+    for image_path in image_paths:
+        if not image_path or not is_uploaded_image_path(image_path):
+            continue
+        if image_ref_is_still_used(conn, image_path):
+            continue
+        filename = str(image_path).strip()[len(UPLOADS_URL_PREFIX):]
+        target = UPLOADS_DIR / filename
+        if target.exists():
+            try:
+                target.unlink()
+            except OSError:
+                pass
 
 
 class NekoHandler(SimpleHTTPRequestHandler):
@@ -468,7 +677,8 @@ class NekoHandler(SimpleHTTPRequestHandler):
             return None
         with get_conn() as conn:
             row = conn.execute("SELECT s.user_id, u.username, s.expires_at FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=?", (token,)).fetchone()
-            if not row or datetime.fromisoformat(row["expires_at"]) < now_utc():
+            expires_at = compact_date_text(row["expires_at"]) if row else None
+            if not row or not expires_at or date.fromisoformat(expires_at) < now_utc().date():
                 if row: conn.execute("DELETE FROM sessions WHERE token=?", (token,))
                 if send_error: self.send_json(401, {"error": "登录已过期"})
                 return None
@@ -483,7 +693,7 @@ class NekoHandler(SimpleHTTPRequestHandler):
             if not row or row["password_hash"] != hash_password(password):
                 self.send_json(401, {"error": "密码错误"}); return
             token = secrets.token_urlsafe(32)
-            expires = (now_utc() + timedelta(days=SESSION_TTL_DAYS)).isoformat()
+            expires = (now_utc() + timedelta(days=SESSION_TTL_DAYS)).date().isoformat()
             conn.execute("INSERT INTO sessions(token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)", (token, row["id"], now_iso(), expires))
         self.send_json(200, {"token": token, "user": {"id": row["id"], "username": row["username"]}})
 
@@ -564,12 +774,23 @@ class NekoHandler(SimpleHTTPRequestHandler):
         items = self.read_json().get("items", [])
         ts = now_iso()
         with get_conn() as conn:
+            old_rows = conn.execute("SELECT * FROM collections").fetchall()
+            old_refs = set()
+            for old_row in old_rows:
+                old_item = row_to_item(old_row)
+                old_refs.update(collect_image_refs(old_item.get("image_data"), old_item.get("book_volumes")))
             rates = get_rates_map(conn)
             conn.execute("DELETE FROM collections")
             for item in items:
                 norm = normalize_item_payload(item, rates)
                 conn.execute("INSERT INTO collections (name, category, series_name, status, platform, purchase_price, purchase_currency, purchase_price_cny, purchase_fx_rate_to_cny, purchase_fx_rate_timestamp, list_price_amount, list_price_currency, list_price_cny, list_fx_rate_to_cny, list_fx_rate_timestamp, book_edition_type, author, publisher, purchase_date, tags, notes, image_data, book_volumes_json, sort_order, created_at, updated_at, is_series, is_private) VALUES (:name, :category, :series_name, :status, :platform, :purchase_price, :purchase_currency, :purchase_price_cny, :purchase_fx_rate_to_cny, :purchase_fx_rate_timestamp, :list_price_amount, :list_price_currency, :list_price_cny, :list_fx_rate_to_cny, :list_fx_rate_timestamp, :book_edition_type, :author, :publisher, :purchase_date, :tags, :notes, :image_data, :book_volumes_json, :sort_order, :created_at, :updated_at, :is_series, :is_private)", {**norm, "created_at": ts, "updated_at": ts})
-        self.send_json(200, {"message": f"导入成功 {len(items)} 条"})
+            new_rows = conn.execute("SELECT * FROM collections").fetchall()
+            new_refs = set()
+            for new_row in new_rows:
+                new_item = row_to_item(new_row)
+                new_refs.update(collect_image_refs(new_item.get("image_data"), new_item.get("book_volumes")))
+            delete_unused_uploaded_images(conn, old_refs - new_refs)
+        self.send_json(200, {"message": f"Imported {len(items)} items"})
 
     def handle_change_password(self):
         user = self.require_auth()
@@ -612,18 +833,28 @@ class NekoHandler(SimpleHTTPRequestHandler):
             with get_conn() as conn:
                 old = conn.execute("SELECT * FROM collections WHERE id=?", (item_id,)).fetchone()
                 if not old: self.send_json(404, {"error": "未找到"}); return
-                norm = normalize_item_payload(self.read_json(), get_rates_map(conn), row_to_item(old))
+                old_item = row_to_item(old)
+                old_refs = collect_image_refs(old_item.get("image_data"), old_item.get("book_volumes"))
+                norm = normalize_item_payload(self.read_json(), get_rates_map(conn), old_item)
                 norm["id"], norm["updated_at"] = item_id, now_iso()
                 conn.execute("UPDATE collections SET name=:name, category=:category, series_name=:series_name, status=:status, platform=:platform, purchase_price=:purchase_price, purchase_currency=:purchase_currency, purchase_price_cny=:purchase_price_cny, purchase_fx_rate_to_cny=:purchase_fx_rate_to_cny, purchase_fx_rate_timestamp=:purchase_fx_rate_timestamp, list_price_amount=:list_price_amount, list_price_currency=:list_price_currency, list_price_cny=:list_price_cny, list_fx_rate_to_cny=:list_fx_rate_to_cny, list_fx_rate_timestamp=:list_fx_rate_timestamp, book_edition_type=:book_edition_type, author=:author, publisher=:publisher, purchase_date=:purchase_date, tags=:tags, notes=:notes, image_data=:image_data, book_volumes_json=:book_volumes_json, sort_order=:sort_order, updated_at=:updated_at, is_series=:is_series, is_private=:is_private WHERE id=:id", norm)
                 row = conn.execute("SELECT * FROM collections WHERE id=?", (item_id,)).fetchone()
+                new_item = row_to_item(row)
+                new_refs = collect_image_refs(new_item.get("image_data"), new_item.get("book_volumes"))
+                delete_unused_uploaded_images(conn, old_refs - new_refs)
             self.send_json(200, {"item": row_to_item(row)})
         except Exception as e: self.send_json(400, {"error": str(e)})
 
     def handle_delete_item(self, item_id):
         if not self.require_auth(): return
         with get_conn() as conn:
-            if conn.execute("DELETE FROM collections WHERE id=?", (item_id,)).rowcount == 0:
-                self.send_json(404, {"error": "未找到"}); return
+            row = conn.execute("SELECT * FROM collections WHERE id=?", (item_id,)).fetchone()
+            if not row:
+                self.send_json(404, {"error": "Item not found"}); return
+            item = row_to_item(row)
+            old_refs = collect_image_refs(item.get("image_data"), item.get("book_volumes"))
+            conn.execute("DELETE FROM collections WHERE id=?", (item_id,))
+            delete_unused_uploaded_images(conn, old_refs)
         self.send_json(200, {"ok": True})
 
     def handle_download_image(self):
@@ -634,11 +865,9 @@ class NekoHandler(SimpleHTTPRequestHandler):
             self.send_json(400, {"error": "URL 不能为空"})
             return
         
-        import urllib.request
-        import base64
         try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            req = Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urlopen(req, timeout=15) as resp:
                 content_type = resp.headers.get("Content-Type", "")
                 if not content_type.startswith("image/"):
                     self.send_json(400, {"error": "链接不是有效的图片"})
@@ -647,8 +876,8 @@ class NekoHandler(SimpleHTTPRequestHandler):
                 if len(data) > MAX_IMAGE_DATA_LENGTH:
                     self.send_json(400, {"error": "图片过大"})
                     return
-                encoded = base64.b64encode(data).decode("utf-8")
-                self.send_json(200, {"image_data": f"data:{content_type};base64,{encoded}"})
+                image_path = save_image_bytes(data, content_type)
+                self.send_json(200, {"image_data": image_path})
         except Exception as e:
             self.send_json(500, {"error": f"下载失败: {str(e)}"})
 
