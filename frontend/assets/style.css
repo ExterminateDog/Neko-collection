@@ -395,6 +395,55 @@ body.dark-mode .readonly-tip {
   overflow: hidden;
 }
 
+.private-badge {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  background: rgba(0, 0, 0, 0.6);
+  color: white;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  backdrop-filter: blur(8px);
+  z-index: 2;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Toggle Button */
+.toggle-btn {
+  padding: 0.5rem 1rem;
+  border-radius: 999px;
+  border: 2px solid var(--line);
+  background: var(--surface);
+  color: var(--text-soft);
+  font-weight: 700;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  min-width: 80px;
+}
+
+.toggle-btn:hover {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+}
+
+.toggle-btn.active {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: white;
+  box-shadow: 0 4px 12px rgba(255, 133, 161, 0.3);
+}
+
+.toggle-btn.active:hover {
+  filter: brightness(1.1);
+  transform: translateY(-1px);
+}
+
 .category-progress-row {
   display: flex;
   align-items: center;
@@ -600,21 +649,24 @@ body.dark-mode .readonly-tip {
   min-width: 1000px;
 }
 
-.volume-table-row > .volume-cell {
-  padding: 0.75rem 0.5rem;
+.volume-cell {
+  padding: 0.5rem;
   border-right: 1px solid transparent;
-  height: 100%;
+  min-height: 44px;
   display: flex;
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-size: 0.8rem;
+  color: var(--text-soft);
 }
 
 .volume-table-row > .volume-cell.volume-name {
   justify-content: flex-start;
   text-align: left;
+  white-space: normal;
+  word-break: break-all;
+  line-height: 1.4;
 }
 
 .volume-table-row:not(.volume-table-head):hover {

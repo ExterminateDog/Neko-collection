@@ -85,7 +85,7 @@ function fileToDataUrl(file) {
 }
 
 function initialItemForm() {
-  return { name: "", category: "手办", status: "owned", platform: "", purchase_price: "", list_price_amount: "", list_price_currency: "CNY", book_edition_type: "普通版", author: "", publisher: "", purchase_date: "", tags: [], notes: "", image_data: null, is_series: true };
+  return { name: "", category: "手办", status: "owned", platform: "", purchase_price: "", list_price_amount: "", list_price_currency: "CNY", book_edition_type: "普通版", author: "", publisher: "", purchase_date: "", tags: [], notes: "", image_data: null, is_series: true, is_private: false };
 }
 function initialVolumeForm() {
   return { volume_title: "", edition_type: "普通版", purchase_status: "owned", platform: "", purchase_price: "", list_price_amount: "", list_price_currency: "CNY", purchase_date: "", notes: "", cover_image_data: null };
@@ -96,7 +96,7 @@ function itemToPayload(item) {
   return {
     name: name, category: item.category, 
     series_name: item.category === "书籍" ? name : null, 
-    status: item.status, platform: item.platform || "", purchase_price: toNumberOrNull(item.purchase_price), purchase_currency: "CNY", list_price_amount: toNumberOrNull(item.list_price_amount), list_price_currency: String(item.list_price_currency || "CNY").toUpperCase(), purchase_date: item.purchase_date || "", book_edition_type: item.book_edition_type || "", author: item.author || "", publisher: item.publisher || "", tags: item.tags || [], notes: item.notes || "", image_data: item.image_data || null, sort_order: item.sort_order || 0, book_volumes: item.book_volumes || [], is_series: isSeries
+    status: item.status, platform: item.platform || "", purchase_price: toNumberOrNull(item.purchase_price), purchase_currency: "CNY", list_price_amount: toNumberOrNull(item.list_price_amount), list_price_currency: String(item.list_price_currency || "CNY").toUpperCase(), purchase_date: item.purchase_date || "", book_edition_type: item.book_edition_type || "", author: item.author || "", publisher: item.publisher || "", tags: item.tags || [], notes: item.notes || "", image_data: item.image_data || null, sort_order: item.sort_order || 0, book_volumes: item.book_volumes || [], is_series: isSeries, is_private: item.is_private || false
   };
 }
 
@@ -228,6 +228,7 @@ function App() {
   const [selectedYear, setSelectedYear] = useState("all");
   const [pieTooltip, setPieTooltip] = useState(null);
   const [isDarkMode, setIsDarkMode] = useState(localStorage.getItem("neko_theme") === "dark");
+  const [isPrivateMode, setIsPrivateMode] = useState(localStorage.getItem("neko_private_mode") === "true");
   const [statusFilter, setStatusFilter] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
@@ -251,7 +252,10 @@ function App() {
   const [editingVolumeIndex, setEditingVolumeIndex] = useState(null);
   const [tagInputValue, setTagInputValue] = useState("");
   const [newPassword, setNewPassword] = useState("");
+  const [imageUrlInput, setImageUrlInput] = useState("");
+  const [volumeImageUrlInput, setVolumeImageUrlInput] = useState("");
   const [colWidths, setColWidths] = useState([48, 200, 100, 100, 120, 100, 120, 100, 80]);
+
   
   const pieCanvasRef = useRef(null);
   const barCanvasRef = useRef(null);
@@ -279,7 +283,7 @@ function App() {
   const refreshAll = useCallback(async () => {
     try {
       const [itemsData, statsData, ratesData] = await Promise.all([
-        apiRequest(`${API_BASE}/items`),
+        apiRequest(`${API_BASE}/items?private_mode=${isPrivateMode}`),
         apiRequest(`${API_BASE}/stats`),
         apiRequest(`${API_BASE}/rates`)
       ]);
@@ -288,7 +292,7 @@ function App() {
       setRates(ratesData.rates || []);
       setSelectedItem(prev => prev ? (itemsData.items || []).find(x => x.id === prev.id) || null : null);
     } catch (e) { console.error(e); }
-  }, [apiRequest]);
+  }, [apiRequest, isPrivateMode]);
 
   useEffect(() => {
     if (token && !user) {
@@ -296,6 +300,22 @@ function App() {
     }
     refreshAll();
   }, [token, refreshAll]);
+
+  const handleDownloadImage = async (url, type) => {
+    if (!url) return;
+    try {
+      const data = await apiRequest(`${API_BASE}/download-image`, { method: "POST", body: JSON.stringify({ url }) });
+      if (type === "item") {
+        setItemForm(prev => ({ ...prev, image_data: data.image_data }));
+        setImageUrlInput("");
+      } else {
+        setVolumeForm(prev => ({ ...prev, cover_image_data: data.image_data }));
+        setVolumeImageUrlInput("");
+      }
+    } catch (e) {
+      alert(e.message);
+    }
+  };
 
   const years = useMemo(() => {
     const s = new Set();
@@ -502,7 +522,10 @@ function App() {
             <div className="collection-grid">
               {!filteredItems.length ? <div className="empty-state">暂无数据</div> : filteredItems.map(item => (
                 <article key={item.id} className="item-card" onClick={async () => { await apiRequest(`${API_BASE}/items/${item.id}`).then(d => { setSelectedItem(d.item); setShowDetail(true); }); }}>
-                  <div className="item-image-wrap">{item.image_data ? <img className="item-image" src={item.image_data} alt={item.name} /> : <div className="item-placeholder">N</div>}</div>
+                  <div className="item-image-wrap">
+                    {item.image_data ? <img className="item-image" src={item.image_data} alt={item.name} /> : <div className="item-placeholder">N</div>}
+                    {item.is_private && <div className="private-badge">🔒 私密</div>}
+                  </div>
                   <div className="item-body">
                     <h3 className="item-title">{item.series_name || item.name}</h3>
                     <div className="category-progress-row"><span className="item-sub">{item.category === "书籍" ? "📚 " : "✨ "}{item.category}</span>
@@ -589,6 +612,22 @@ function App() {
           <div className="modal-card small" onMouseDown={e => e.stopPropagation()}>
             <div className="modal-head"><h3>系统设置</h3><button className="icon-btn" onClick={() => setShowSettings(false)}>×</button></div>
             <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+              <section>
+                <h4>偏好设置</h4>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0.5rem 0" }}>
+                  <span>私密模式 (显示标记为私密的条目)</span>
+                  <button 
+                    className={`toggle-btn ${isPrivateMode ? "active" : ""}`}
+                    onClick={() => {
+                      const val = !isPrivateMode;
+                      setIsPrivateMode(val);
+                      localStorage.setItem("neko_private_mode", val);
+                    }}
+                  >
+                    {isPrivateMode ? "已开启" : "已关闭"}
+                  </button>
+                </div>
+              </section>
               <section><h4>修改密码</h4><div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}><input type="password" placeholder="新密码" value={newPassword} onChange={e => setNewPassword(e.target.value)} style={{ flex: 1, padding: "0.5rem", borderRadius: "8px", border: "1px solid var(--line)" }} /><button className="btn primary small" onClick={async () => { if (newPassword.length < 6) { alert("至少6位"); return; } await apiRequest(`${API_BASE}/change-password`, { method: "POST", body: JSON.stringify({ new_password: newPassword }) }); alert("成功"); setNewPassword(""); }}>修改</button></div></section>
               <section><h4>数据备份与恢复</h4><div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}><button className="btn ghost small" onClick={handleExport}>导出 JSON</button><button className="btn ghost small" onClick={() => fileInputRef.current?.click()}>导入 JSON</button><input type="file" ref={fileInputRef} hidden accept=".json" onChange={handleImport} /></div></section>
               <section>
@@ -650,7 +689,11 @@ function App() {
                     {itemForm.image_data ? <img src={itemForm.image_data} alt="preview" /> : <span>📷</span>}
                   </div>
                   <div className="file-input-wrapper"><button type="button" className="btn ghost small" style={{ width: "100%" }}>上传图片</button><input type="file" accept="image/*" onChange={async e => { if (e.target.files?.[0]) setItemForm({ ...itemForm, image_data: await fileToDataUrl(e.target.files[0]) }); }} /></div>
-                  {itemForm.image_data && <button type="button" className="btn danger small" onClick={() => setItemForm({ ...itemForm, image_data: null })}>移除图片</button>}
+                  <div style={{ display: "flex", gap: "0.25rem", marginTop: "0.5rem" }}>
+                    <input type="text" placeholder="图片链接..." value={imageUrlInput} onChange={e => setImageUrlInput(e.target.value)} style={{ flex: 1, fontSize: "0.8rem", padding: "0.25rem", borderRadius: "4px", border: "1px solid var(--line)", background: "var(--surface)" }} />
+                    <button type="button" className="btn ghost small" onClick={() => handleDownloadImage(imageUrlInput, "item")}>下载</button>
+                  </div>
+                  {itemForm.image_data && <button type="button" className="btn danger small" onClick={() => setItemForm({ ...itemForm, image_data: null })} style={{ width: "100%", marginTop: "0.5rem" }}>移除图片</button>}
                 </div>
                 <div className="form-fields-col">
                   <label className="full">名称 / 系列名<input type="text" value={itemForm.name} onChange={e => setItemForm({ ...itemForm, name: e.target.value })} required /></label>
@@ -736,6 +779,10 @@ function App() {
                     </div>
                   </div>
                   <label className="full">备注<textarea rows="2" value={itemForm.notes} onChange={e => setItemForm({ ...itemForm, notes: e.target.value })}></textarea></label>
+                  <div className="full" style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginTop: "0.5rem" }}>
+                    <input type="checkbox" id="is_private_checkbox" checked={itemForm.is_private} onChange={e => setItemForm({ ...itemForm, is_private: e.target.checked })} style={{ width: "auto" }} />
+                    <label htmlFor="is_private_checkbox" style={{ margin: 0, cursor: "pointer", fontWeight: "600" }}>🔒 标记为私密 (仅在私密模式下显示)</label>
+                  </div>
                 </div>
               </div>
               <div className="form-actions" style={{ marginTop: "2rem" }}><button type="button" className="btn ghost" onClick={() => setShowItem(false)}>取消</button><button type="submit" className="btn primary">保存</button></div>
@@ -793,41 +840,42 @@ function App() {
               </div>
               {selectedItem.category === "书籍" && selectedItem.is_series && (
                 <div className="volumes-grid">
-                  <div className="volume-table-row volume-table-head" style={{ "--col-widths": gridTemplate }}>
-                    {["封面", "名称", "版本", "购买价", "定价", "盈亏", "购买平台", "状态", "操作"].map((label, idx) => (
-                      <div key={idx} className="volume-cell">
-                        {label}
-                        {idx < 8 && <div className="resizer" onMouseDown={(e) => handleResize(idx, e)}></div>}
-                      </div>
-                    ))}
-                  </div>
-                  {selectedItem.book_volumes?.map((v, i) => (
-                    <div key={i} className="volume-table-row" style={{ "--col-widths": gridTemplate }} onClick={() => { setSelectedVolume(v); setShowVolumeDetail(true); }}>
-                      <div className="volume-cell">
-                        {v.cover_image_data ? (
-                          <img className="volume-cover" src={v.cover_image_data} onClick={e => { e.stopPropagation(); triggerLightbox(v.cover_image_data); }} />
-                        ) : (
-                          <div className="volume-cover volume-cover-fallback">B</div>
-                        )}
-                      </div>
-                      <div className="volume-cell volume-name" title={v.volume_title}>{v.volume_title}</div>
-                      <div className="volume-cell"><span className={`edition-pill ${editionClass(v.edition_type)}`}>{v.edition_type}</span></div>
-                      <div className="volume-cell volume-number">{fmtMoney(v.purchase_price_cny)}</div>
-                      <div className="volume-cell volume-number">{fmtPriceByCurrency(v.list_price_amount, v.list_price_currency)}</div>
-                      <div className="volume-cell">
-                        {v.purchase_status === "owned" && v.list_price_cny > 0 ? (
-                          <span className={v.list_price_cny - v.purchase_price_cny >= 0 ? "diff-positive" : "diff-negative"}>
-                            {fmtSignedMoney(v.list_price_cny - v.purchase_price_cny)}
-                          </span>
-                        ) : "-"}
-                      </div>
-                      <div className="volume-cell">{fmtPlatform(v.platform)}</div>
-                      <div className="volume-cell"><span className={`status-badge ${statusClass(v.purchase_status)}`}>{statusLabel(v.purchase_status)}</span></div>
-                      <div className="volume-cell volume-row-actions" onClick={e => e.stopPropagation()}>
-                        {loggedIn && <><button className="action-icon-btn" onClick={() => openVolumeModal(i)}>✎</button><button className="action-icon-btn danger" onClick={async () => { if (confirm("确定删除？")) { const nv = [...selectedItem.book_volumes]; nv.splice(i, 1); await apiRequest(`${API_BASE}/items/${selectedItem.id}`, { method: "PUT", body: JSON.stringify(itemToPayload({ ...selectedItem, book_volumes: nv })) }); await refreshAll(); } }}>🗑</button></>}
-                      </div>
+                <div className="volume-table-row volume-table-head" style={{ "--col-widths": gridTemplate }}>
+                  {["封面", "名称", "版本", "购买价", "定价", "盈亏", "购买平台", "状态", "操作"].map((label, idx) => (
+                    <div key={idx} className="volume-cell">
+                      {label}
+                      {idx < 8 && <div className="resizer" onMouseDown={(e) => handleResize(idx, e)}></div>}
                     </div>
                   ))}
+                </div>
+                {selectedItem.book_volumes?.map((v, i) => (
+                  <div key={i} className="volume-table-row" style={{ "--col-widths": gridTemplate }} onClick={() => { setSelectedVolume(v); setShowVolumeDetail(true); }}>
+                    <div className="volume-cell">
+                      {v.cover_image_data ? (
+                        <img className="volume-cover" src={v.cover_image_data} onClick={e => { e.stopPropagation(); triggerLightbox(v.cover_image_data); }} />
+                      ) : (
+                        <div className="volume-cover volume-cover-fallback">B</div>
+                      )}
+                    </div>
+                    <div className="volume-cell volume-name" title={v.volume_title}>{v.volume_title}</div>
+                    <div className="volume-cell"><span className={`edition-pill ${editionClass(v.edition_type)}`}>{v.edition_type}</span></div>
+                    <div className="volume-cell volume-number">{fmtMoney(v.purchase_price_cny)}</div>
+                    <div className="volume-cell volume-number">{fmtPriceByCurrency(v.list_price_amount, v.list_price_currency)}</div>
+                    <div className="volume-cell">
+                      {v.purchase_status === "owned" && v.list_price_cny > 0 ? (
+                        <span className={v.list_price_cny - v.purchase_price_cny >= 0 ? "diff-positive" : "diff-negative"}>
+                          {fmtSignedMoney(v.list_price_cny - v.purchase_price_cny)}
+                        </span>
+                      ) : "-"}
+                    </div>
+                    <div className="volume-cell">{fmtPlatform(v.platform)}</div>
+                    <div className="volume-cell"><span className={`status-badge ${statusClass(v.purchase_status)}`}>{statusLabel(v.purchase_status)}</span></div>
+                    <div className="volume-cell volume-row-actions" onClick={e => e.stopPropagation()}>
+                      {loggedIn && <><button className="action-icon-btn" onClick={() => openVolumeModal(i)}>✎</button><button className="action-icon-btn danger" onClick={async () => { if (confirm("确定删除？")) { const nv = [...selectedItem.book_volumes]; nv.splice(i, 1); await apiRequest(`${API_BASE}/items/${selectedItem.id}`, { method: "PUT", body: JSON.stringify(itemToPayload({ ...selectedItem, book_volumes: nv })) }); await refreshAll(); } }}>🗑</button></>}
+                    </div>
+                  </div>
+                ))}
+
                   {loggedIn && <button className="btn ghost small top-gap" onClick={() => openVolumeModal(null)}>+ 新增分册</button>}
                 </div>
               )}
@@ -839,26 +887,35 @@ function App() {
 
       {showVolumeDetail && selectedVolume && (
         <div className="modal" onMouseDown={e => e.target === e.currentTarget && setShowVolumeDetail(false)}>
-          <div className="modal-card small" onMouseDown={e => e.stopPropagation()}>
+          <div className="modal-card" onMouseDown={e => e.stopPropagation()}>
             <div className="modal-head"><h3>分册详情</h3><button className="icon-btn" onClick={() => setShowVolumeDetail(false)}>×</button></div>
-            <div className="volume-detail-card">
-              <div className="volume-detail-row">
+            <div className="detail-shell">
+              <div className="detail-grid">
                 {selectedVolume.cover_image_data ? (
-                  <img className="volume-detail-img" src={selectedVolume.cover_image_data} onClick={() => triggerLightbox(selectedVolume.cover_image_data)} />
+                  <img className="detail-cover" src={selectedVolume.cover_image_data} alt="cover" onClick={() => triggerLightbox(selectedVolume.cover_image_data)} />
                 ) : (
-                  <div className="volume-detail-img volume-cover-fallback" style={{fontSize:'3rem'}}>B</div>
+                  <div className="detail-cover item-image-wrap"><div className="item-placeholder">B</div></div>
                 )}
-                <div className="volume-detail-info">
-                  <div><strong>分册名</strong><br/>{selectedVolume.volume_title}</div>
-                  <div><strong>版本</strong><br/>{selectedVolume.edition_type}</div>
-                  <div><strong>状态</strong><br/><span className={`status-pill ${statusClass(selectedVolume.purchase_status)}`}>{statusLabel(selectedVolume.purchase_status)}</span></div>
-                  <div><strong>购买平台</strong><br/>{fmtPlatform(selectedVolume.platform)}</div>
-                  <div><strong>购买价格</strong><br/>{fmtMoney(selectedVolume.purchase_price_cny)}</div>
-                  <div><strong>商品定价</strong><br/>{fmtPriceByCurrency(selectedVolume.list_price_amount, selectedVolume.list_price_currency)}</div>
-                  {selectedVolume.purchase_status !== "wishlist" && <div><strong>购买日期</strong><br/>{selectedVolume.purchase_date || "-"}</div>}
+                <div className="detail-meta">
+                  <div className="detail-line"><strong>分册名</strong> {selectedVolume.volume_title}</div>
+                  <div className="detail-line"><strong>版本</strong> {selectedVolume.edition_type}</div>
+                  <div className="detail-line"><strong>购买平台</strong> {fmtPlatform(selectedVolume.platform)}</div>
+                  <div className="detail-line"><strong>购买价格</strong> {fmtMoney(selectedVolume.purchase_price_cny)}</div>
+                  <div className="detail-line"><strong>商品定价</strong> {fmtPriceByCurrency(selectedVolume.list_price_amount, selectedVolume.list_price_currency)}</div>
+                  {selectedVolume.purchase_status !== "wishlist" && <div className="detail-line"><strong>购买日期</strong> {selectedVolume.purchase_date || "-"}</div>}
+                  {selectedVolume.purchase_status === "owned" && selectedVolume.list_price_cny > 0 && selectedVolume.purchase_price_cny > 0 && (
+                    <div className="detail-line">
+                      <strong>盈亏估算</strong>
+                      {(() => {
+                        const diff = selectedVolume.list_price_cny - selectedVolume.purchase_price_cny;
+                        return <span className={diff >= 0 ? "diff-positive" : "diff-negative"}>{fmtSignedMoney(diff)}</span>;
+                      })()}
+                    </div>
+                  )}
+                  <div className="detail-line"><strong>状态</strong> <span className={`status-pill ${statusClass(selectedVolume.purchase_status)}`}>{statusLabel(selectedVolume.purchase_status)}</span></div>
+                  <div className="detail-line"><strong>备注</strong> {selectedVolume.notes || "-"}</div>
                 </div>
               </div>
-              {selectedVolume.notes && <div style={{marginTop:'1rem'}}><strong>备注</strong><p style={{margin:'0.5rem 0', color:'var(--text-soft)'}}>{selectedVolume.notes}</p></div>}
             </div>
           </div>
         </div>
@@ -875,6 +932,11 @@ function App() {
                     {volumeForm.cover_image_data ? <img src={volumeForm.cover_image_data} alt="preview" /> : <span>📷</span>}
                   </div>
                   <div className="file-input-wrapper"><button type="button" className="btn ghost small" style={{ width: "100%" }}>封面</button><input type="file" accept="image/*" onChange={async e => { if (e.target.files?.[0]) setVolumeForm({ ...volumeForm, cover_image_data: await fileToDataUrl(e.target.files[0]) }); }} /></div>
+                  <div style={{ display: "flex", gap: "0.25rem", marginTop: "0.5rem" }}>
+                    <input type="text" placeholder="图片链接..." value={volumeImageUrlInput} onChange={e => setVolumeImageUrlInput(e.target.value)} style={{ flex: 1, fontSize: "0.8rem", padding: "0.25rem", borderRadius: "4px", border: "1px solid var(--line)", background: "var(--surface)" }} />
+                    <button type="button" className="btn ghost small" onClick={() => handleDownloadImage(volumeImageUrlInput, "volume")}>下载</button>
+                  </div>
+                  {volumeForm.cover_image_data && <button type="button" className="btn danger small" onClick={() => setVolumeForm({ ...volumeForm, cover_image_data: null })} style={{ width: "100%", marginTop: "0.5rem" }}>移除图片</button>}
                 </div>
                 <div className="form-fields-col">
                   <label className="full">分册名<input type="text" value={volumeForm.volume_title} onChange={e => setVolumeForm({ ...volumeForm, volume_title: e.target.value })} required /></label>

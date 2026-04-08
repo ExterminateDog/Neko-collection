@@ -165,7 +165,8 @@ def init_db() -> None:
             "list_fx_rate_timestamp TEXT", "book_edition_type TEXT",
             "image_data TEXT", "book_volumes_json TEXT",
             "sort_order INTEGER NOT NULL DEFAULT 0", "author TEXT", "publisher TEXT",
-            "is_series INTEGER NOT NULL DEFAULT 1"
+            "is_series INTEGER NOT NULL DEFAULT 1",
+            "is_private INTEGER NOT NULL DEFAULT 0"
         ]:
             ensure_column(conn, "collections", col)
 
@@ -325,6 +326,7 @@ def normalize_item_payload(payload: dict, rates_map: dict, existing_item=None) -
         vols = normalize_book_volumes(payload.get("book_volumes", None), rates_map, existing_item.get("book_volumes", []))
         book_volumes_json = json.dumps(vols, ensure_ascii=False)
     sort_order = int(payload.get("sort_order", existing_item.get("sort_order", 0)))
+    is_private = 1 if payload.get("is_private") in [True, 1, "1", "true"] else 0
     return {
         "name": name, "category": category, "series_name": series_name, "status": status,
         "platform": str(payload.get("platform", "")).strip() or None,
@@ -339,7 +341,7 @@ def normalize_item_payload(payload: dict, rates_map: dict, existing_item=None) -
         "book_volumes_json": book_volumes_json, "sort_order": sort_order,
         "author": str(payload.get("author", "")).strip() or None,
         "publisher": str(payload.get("publisher", "")).strip() or None,
-        "is_series": is_series,
+        "is_series": is_series, "is_private": is_private,
     }
 
 
@@ -381,7 +383,7 @@ def row_to_item(row: sqlite3.Row) -> dict:
         "image_data": row["image_data"], "sort_order": row["sort_order"],
         "created_at": row["created_at"], "updated_at": row["updated_at"],
         "total_spent_cny": round(total, 2), "volume_count": len(vols),
-        "is_series": bool(row["is_series"]),
+        "is_series": bool(row["is_series"]), "is_private": bool(row["is_private"]),
     }
 
 
@@ -420,6 +422,7 @@ class NekoHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/import": self.handle_import(); return
         if parsed.path == "/api/change-password": self.handle_change_password(); return
         if parsed.path == "/api/rates/update": self.handle_update_rates(); return
+        if parsed.path == "/api/download-image": self.handle_download_image(); return
         self.send_json(404, {"error": "Not found"})
 
     def do_PUT(self):
@@ -507,6 +510,12 @@ class NekoHandler(SimpleHTTPRequestHandler):
             where.append("status=?"); vals.append(params["status"][0])
         if (params.get("category") or [None])[0]:
             where.append("category=?"); vals.append(params["category"][0])
+        
+        user = self.get_auth_user(send_error=False)
+        private_mode = (params.get("private_mode") or ["false"])[0] == "true"
+        if not user or not private_mode:
+            where.append("is_private=0")
+            
         clause = "WHERE " + " AND ".join(where) if where else ""
         with get_conn() as conn:
             rows = conn.execute(f"SELECT * FROM collections {clause} ORDER BY sort_order, id", vals).fetchall()
@@ -559,7 +568,7 @@ class NekoHandler(SimpleHTTPRequestHandler):
             conn.execute("DELETE FROM collections")
             for item in items:
                 norm = normalize_item_payload(item, rates)
-                conn.execute("INSERT INTO collections (name, category, series_name, status, platform, purchase_price, purchase_currency, purchase_price_cny, purchase_fx_rate_to_cny, purchase_fx_rate_timestamp, list_price_amount, list_price_currency, list_price_cny, list_fx_rate_to_cny, list_fx_rate_timestamp, book_edition_type, author, publisher, purchase_date, tags, notes, image_data, book_volumes_json, sort_order, created_at, updated_at, is_series) VALUES (:name, :category, :series_name, :status, :platform, :purchase_price, :purchase_currency, :purchase_price_cny, :purchase_fx_rate_to_cny, :purchase_fx_rate_timestamp, :list_price_amount, :list_price_currency, :list_price_cny, :list_fx_rate_to_cny, :list_fx_rate_timestamp, :book_edition_type, :author, :publisher, :purchase_date, :tags, :notes, :image_data, :book_volumes_json, :sort_order, :created_at, :updated_at, :is_series)", {**norm, "created_at": ts, "updated_at": ts})
+                conn.execute("INSERT INTO collections (name, category, series_name, status, platform, purchase_price, purchase_currency, purchase_price_cny, purchase_fx_rate_to_cny, purchase_fx_rate_timestamp, list_price_amount, list_price_currency, list_price_cny, list_fx_rate_to_cny, list_fx_rate_timestamp, book_edition_type, author, publisher, purchase_date, tags, notes, image_data, book_volumes_json, sort_order, created_at, updated_at, is_series, is_private) VALUES (:name, :category, :series_name, :status, :platform, :purchase_price, :purchase_currency, :purchase_price_cny, :purchase_fx_rate_to_cny, :purchase_fx_rate_timestamp, :list_price_amount, :list_price_currency, :list_price_cny, :list_fx_rate_to_cny, :list_fx_rate_timestamp, :book_edition_type, :author, :publisher, :purchase_date, :tags, :notes, :image_data, :book_volumes_json, :sort_order, :created_at, :updated_at, :is_series, :is_private)", {**norm, "created_at": ts, "updated_at": ts})
         self.send_json(200, {"message": f"导入成功 {len(items)} 条"})
 
     def handle_change_password(self):
@@ -592,7 +601,7 @@ class NekoHandler(SimpleHTTPRequestHandler):
             with get_conn() as conn:
                 norm = normalize_item_payload(self.read_json(), get_rates_map(conn))
                 ts = now_iso()
-                cursor = conn.execute("INSERT INTO collections (name, category, series_name, status, platform, purchase_price, purchase_currency, purchase_price_cny, purchase_fx_rate_to_cny, purchase_fx_rate_timestamp, list_price_amount, list_price_currency, list_price_cny, list_fx_rate_to_cny, list_fx_rate_timestamp, book_edition_type, author, publisher, purchase_date, tags, notes, image_data, book_volumes_json, sort_order, created_at, updated_at, is_series) VALUES (:name, :category, :series_name, :status, :platform, :purchase_price, :purchase_currency, :purchase_price_cny, :purchase_fx_rate_to_cny, :purchase_fx_rate_timestamp, :list_price_amount, :list_price_currency, :list_price_cny, :list_fx_rate_to_cny, :list_fx_rate_timestamp, :book_edition_type, :author, :publisher, :purchase_date, :tags, :notes, :image_data, :book_volumes_json, :sort_order, :created_at, :updated_at, :is_series)", {**norm, "created_at": ts, "updated_at": ts})
+                cursor = conn.execute("INSERT INTO collections (name, category, series_name, status, platform, purchase_price, purchase_currency, purchase_price_cny, purchase_fx_rate_to_cny, purchase_fx_rate_timestamp, list_price_amount, list_price_currency, list_price_cny, list_fx_rate_to_cny, list_fx_rate_timestamp, book_edition_type, author, publisher, purchase_date, tags, notes, image_data, book_volumes_json, sort_order, created_at, updated_at, is_series, is_private) VALUES (:name, :category, :series_name, :status, :platform, :purchase_price, :purchase_currency, :purchase_price_cny, :purchase_fx_rate_to_cny, :purchase_fx_rate_timestamp, :list_price_amount, :list_price_currency, :list_price_cny, :list_fx_rate_to_cny, :list_fx_rate_timestamp, :book_edition_type, :author, :publisher, :purchase_date, :tags, :notes, :image_data, :book_volumes_json, :sort_order, :created_at, :updated_at, :is_series, :is_private)", {**norm, "created_at": ts, "updated_at": ts})
                 row = conn.execute("SELECT * FROM collections WHERE id=?", (cursor.lastrowid,)).fetchone()
             self.send_json(201, {"item": row_to_item(row)})
         except Exception as e: self.send_json(400, {"error": str(e)})
@@ -605,7 +614,7 @@ class NekoHandler(SimpleHTTPRequestHandler):
                 if not old: self.send_json(404, {"error": "未找到"}); return
                 norm = normalize_item_payload(self.read_json(), get_rates_map(conn), row_to_item(old))
                 norm["id"], norm["updated_at"] = item_id, now_iso()
-                conn.execute("UPDATE collections SET name=:name, category=:category, series_name=:series_name, status=:status, platform=:platform, purchase_price=:purchase_price, purchase_currency=:purchase_currency, purchase_price_cny=:purchase_price_cny, purchase_fx_rate_to_cny=:purchase_fx_rate_to_cny, purchase_fx_rate_timestamp=:purchase_fx_rate_timestamp, list_price_amount=:list_price_amount, list_price_currency=:list_price_currency, list_price_cny=:list_price_cny, list_fx_rate_to_cny=:list_fx_rate_to_cny, list_fx_rate_timestamp=:list_fx_rate_timestamp, book_edition_type=:book_edition_type, author=:author, publisher=:publisher, purchase_date=:purchase_date, tags=:tags, notes=:notes, image_data=:image_data, book_volumes_json=:book_volumes_json, sort_order=:sort_order, updated_at=:updated_at, is_series=:is_series WHERE id=:id", norm)
+                conn.execute("UPDATE collections SET name=:name, category=:category, series_name=:series_name, status=:status, platform=:platform, purchase_price=:purchase_price, purchase_currency=:purchase_currency, purchase_price_cny=:purchase_price_cny, purchase_fx_rate_to_cny=:purchase_fx_rate_to_cny, purchase_fx_rate_timestamp=:purchase_fx_rate_timestamp, list_price_amount=:list_price_amount, list_price_currency=:list_price_currency, list_price_cny=:list_price_cny, list_fx_rate_to_cny=:list_fx_rate_to_cny, list_fx_rate_timestamp=:list_fx_rate_timestamp, book_edition_type=:book_edition_type, author=:author, publisher=:publisher, purchase_date=:purchase_date, tags=:tags, notes=:notes, image_data=:image_data, book_volumes_json=:book_volumes_json, sort_order=:sort_order, updated_at=:updated_at, is_series=:is_series, is_private=:is_private WHERE id=:id", norm)
                 row = conn.execute("SELECT * FROM collections WHERE id=?", (item_id,)).fetchone()
             self.send_json(200, {"item": row_to_item(row)})
         except Exception as e: self.send_json(400, {"error": str(e)})
@@ -616,6 +625,32 @@ class NekoHandler(SimpleHTTPRequestHandler):
             if conn.execute("DELETE FROM collections WHERE id=?", (item_id,)).rowcount == 0:
                 self.send_json(404, {"error": "未找到"}); return
         self.send_json(200, {"ok": True})
+
+    def handle_download_image(self):
+        if not self.require_auth(): return
+        payload = self.read_json()
+        url = payload.get("url")
+        if not url:
+            self.send_json(400, {"error": "URL 不能为空"})
+            return
+        
+        import urllib.request
+        import base64
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                content_type = resp.headers.get("Content-Type", "")
+                if not content_type.startswith("image/"):
+                    self.send_json(400, {"error": "链接不是有效的图片"})
+                    return
+                data = resp.read()
+                if len(data) > MAX_IMAGE_DATA_LENGTH:
+                    self.send_json(400, {"error": "图片过大"})
+                    return
+                encoded = base64.b64encode(data).decode("utf-8")
+                self.send_json(200, {"image_data": f"data:{content_type};base64,{encoded}"})
+        except Exception as e:
+            self.send_json(500, {"error": f"下载失败: {str(e)}"})
 
 
 def run_server():
