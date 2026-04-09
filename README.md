@@ -4,7 +4,7 @@
   <img src="frontend/assets/logo.png" alt="Neko Collection Logo" width="120">
 </p>
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/your-username/neko-collection)
+[![Version](https://img.shields.io/badge/version-1.5.0-blue.svg)](https://github.com/your-username/neko-collection)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 **Neko Collection** 是一个专为收藏爱好者设计的私人收藏管理系统。它提供了一个现代化的 Web 界面，帮助你轻松记录、分类和统计你的收藏品（如书籍、手办、周边等）。
@@ -24,6 +24,7 @@
   - **访客模式**：仅限查看公开条目，保护数据安全。
   - **管理员模式**：登录后可进行新增、编辑、删除、汇率刷新及查看/管理私密条目。
 - 💱 **实时汇率**：支持刷新汇率，方便记录海外购入的收藏品。
+- 💾 **服务器备份管理**：支持在线生成备份、查看备份列表、从服务器恢复或删除备份文件。
 
 ---
 

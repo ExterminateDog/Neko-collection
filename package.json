@@ -1,7 +1,7 @@
 ﻿{
   "name": "neko-collection-frontend",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.5.0",
   "scripts": {
     "build": "esbuild frontend/assets/app.jsx --bundle --format=iife --target=es2018 --minify --outfile=frontend/assets/app.js"
   },

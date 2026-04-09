@@ -2,10 +2,14 @@
 import base64
 import binascii
 import hashlib
+import io
 import json
 import os
 import secrets
 import sqlite3
+import threading
+import time
+import zipfile
 from datetime import date, datetime, timedelta, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -19,12 +23,17 @@ DB_PATH = SCRIPT_DIR / "neko_collection.db"
 FRONTEND_DIR = SCRIPT_DIR.parent / "frontend"
 UPLOADS_DIR = FRONTEND_DIR / "uploads"
 UPLOADS_URL_PREFIX = "/uploads/"
+BACKUPS_DIR = SCRIPT_DIR / "backups"
 
 DEFAULT_ADMIN_USERNAME = os.environ.get("NEKO_ADMIN_USERNAME", "admin")
 DEFAULT_ADMIN_PASSWORD = os.environ.get("NEKO_ADMIN_PASSWORD", "neko12345")
 PASSWORD_SALT = os.environ.get("NEKO_PASSWORD_SALT", "neko-collection-salt")
 SESSION_TTL_DAYS = int(os.environ.get("NEKO_SESSION_TTL_DAYS", "7"))
 MAX_IMAGE_DATA_LENGTH = int(os.environ.get("NEKO_MAX_IMAGE_DATA_LENGTH", "5000000"))
+AUTO_BACKUP_ENABLED = os.environ.get("NEKO_AUTO_BACKUP_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}
+AUTO_BACKUP_TIME = os.environ.get("NEKO_AUTO_BACKUP_TIME", "03:00").strip() or "03:00"
+MAX_LOCAL_BACKUPS = max(1, int(os.environ.get("NEKO_MAX_LOCAL_BACKUPS", "3")))
+AUTO_BACKUP_POLL_SECONDS = max(60, int(os.environ.get("NEKO_AUTO_BACKUP_POLL_SECONDS", "300")))
 
 DEFAULT_RATES = {"CNY": 1.0, "JPY": 0.048, "TWD": 0.225, "HKD": 0.92}
 ALLOWED_CURRENCIES = set(DEFAULT_RATES.keys())
@@ -38,6 +47,9 @@ IMAGE_EXTENSION_MAP = {
     "image/gif": ".gif",
     "image/bmp": ".bmp",
 }
+BACKUP_VERSION = 1
+BACKUP_FILE_PREFIX = "neko-backup-"
+backup_lock = threading.Lock()
 
 
 def recreate_collections_with_new_status_constraint(conn: sqlite3.Connection) -> None:
@@ -121,6 +133,7 @@ def ensure_column(conn: sqlite3.Connection, table: str, definition: str) -> None
 
 def init_db() -> None:
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
     with get_conn() as conn:
         conn.execute(
             """
@@ -596,6 +609,264 @@ def delete_unused_uploaded_images(conn: sqlite3.Connection, image_paths):
                 pass
 
 
+def uploaded_filename_from_path(image_path):
+    text = str(image_path or "").strip()
+    if not is_uploaded_image_path(text):
+        return None
+    return text[len(UPLOADS_URL_PREFIX):]
+
+
+def collect_items_image_refs(items):
+    refs = set()
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        refs.update(collect_image_refs(item.get("image_data"), item.get("book_volumes")))
+    return refs
+
+
+def build_backup_archive(conn: sqlite3.Connection) -> bytes:
+    rows = conn.execute("SELECT * FROM collections ORDER BY sort_order, id").fetchall()
+    items = [row_to_item(row) for row in rows]
+    refs = sorted(collect_items_image_refs(items))
+    uploads = []
+    missing_uploads = []
+
+    for image_path in refs:
+        filename = uploaded_filename_from_path(image_path)
+        if not filename:
+            continue
+        target = UPLOADS_DIR / filename
+        if target.is_file():
+            uploads.append((filename, target))
+        else:
+            missing_uploads.append(filename)
+
+    manifest = {
+        "app": "Neko Collection",
+        "version": BACKUP_VERSION,
+        "exported_at": now_iso(),
+        "image_storage": "file",
+        "item_count": len(items),
+        "upload_file_count": len(uploads),
+        "missing_uploads": missing_uploads,
+    }
+    payload = {"items": items}
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+        archive.writestr("items.json", json.dumps(payload, ensure_ascii=False, indent=2))
+        for filename, target in uploads:
+            archive.write(target, arcname=f"uploads/{filename}")
+    return buffer.getvalue()
+
+
+def parse_backup_archive(data: bytes):
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile as exc:
+        raise ValueError("备份文件不是有效的 ZIP 压缩包") from exc
+
+    with archive:
+        names = set(archive.namelist())
+        if "items.json" not in names:
+            raise ValueError("备份包中缺失 items.json")
+
+        try:
+            payload = json.loads(archive.read("items.json").decode("utf-8"))
+        except Exception as exc:
+            raise ValueError("备份中的 items.json 无效") from exc
+
+        items = payload.get("items")
+        if not isinstance(items, list):
+            raise ValueError("备份中的 items.json 必须包含项目数组")
+
+        manifest = {}
+        if "manifest.json" in names:
+            try:
+                manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+            except Exception as exc:
+                raise ValueError("备份中的 manifest.json 无效") from exc
+
+        refs = sorted(collect_items_image_refs(items))
+        uploads = {}
+        missing_uploads = []
+        for image_path in refs:
+            filename = uploaded_filename_from_path(image_path)
+            if not filename:
+                continue
+            arcname = f"uploads/{filename}"
+            if arcname not in names:
+                missing_uploads.append(filename)
+                continue
+            uploads[filename] = archive.read(arcname)
+
+        if missing_uploads:
+            raise ValueError(f"备份包缺失 {len(missing_uploads)} 个引用的图片文件")
+
+    return {"items": items, "manifest": manifest, "uploads": uploads}
+
+
+def restore_backup_uploads(upload_files):
+    for filename, data in (upload_files or {}).items():
+        if not filename or "/" in filename or "\\" in filename:
+            raise ValueError("Backup archive contains an invalid upload file name")
+        (UPLOADS_DIR / filename).write_bytes(data)
+
+
+def summarize_backup(backup):
+    manifest = backup.get("manifest") or {}
+    items = backup.get("items") or []
+    uploads = backup.get("uploads") or {}
+    return {
+        "app": manifest.get("app") or "Neko Collection",
+        "version": manifest.get("version") or BACKUP_VERSION,
+        "exported_at": manifest.get("exported_at"),
+        "item_count": len(items),
+        "upload_file_count": len(uploads),
+    }
+
+
+def parse_backup_schedule_time():
+    try:
+        hour_text, minute_text = AUTO_BACKUP_TIME.split(":", 1)
+        hour = int(hour_text)
+        minute = int(minute_text)
+    except Exception:
+        return 3, 0
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return 3, 0
+    return hour, minute
+
+
+def list_local_backup_files():
+    return sorted(
+        [path for path in BACKUPS_DIR.glob(f"{BACKUP_FILE_PREFIX}*.zip") if path.is_file()],
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+
+
+def prune_local_backups():
+    for stale in list_local_backup_files()[MAX_LOCAL_BACKUPS:]:
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
+
+def backup_path_for_date(day_value):
+    return BACKUPS_DIR / f"{BACKUP_FILE_PREFIX}{day_value.isoformat()}.zip"
+
+
+def is_valid_backup_filename(filename):
+    text = str(filename or "").strip()
+    return bool(text) and text.startswith(BACKUP_FILE_PREFIX) and text.endswith(".zip") and "/" not in text and "\\" not in text
+
+
+def local_backup_path(filename):
+    if not is_valid_backup_filename(filename):
+        raise ValueError("无效的备份文件名")
+    return BACKUPS_DIR / filename
+
+
+def summarize_backup_file(path):
+    if not path.is_file():
+        raise FileNotFoundError(path.name)
+    with zipfile.ZipFile(path) as archive:
+        names = set(archive.namelist())
+        manifest = {}
+        if "manifest.json" in names:
+            manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+        item_count = None
+        if "items.json" in names:
+            payload = json.loads(archive.read("items.json").decode("utf-8"))
+            items = payload.get("items")
+            if isinstance(items, list):
+                item_count = len(items)
+        upload_count = len([name for name in names if name.startswith("uploads/") and not name.endswith("/")])
+    stat = path.stat()
+    return {
+        "file_name": path.name,
+        "file_size": stat.st_size,
+        "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+        "app": manifest.get("app") or "Neko Collection",
+        "version": manifest.get("version") or BACKUP_VERSION,
+        "exported_at": manifest.get("exported_at"),
+        "item_count": item_count if item_count is not None else manifest.get("item_count") or 0,
+        "upload_file_count": upload_count if upload_count is not None else manifest.get("upload_file_count") or 0,
+    }
+
+
+def list_local_backup_summaries():
+    summaries = []
+    for path in list_local_backup_files():
+        try:
+            summaries.append(summarize_backup_file(path))
+        except Exception:
+            summaries.append({
+                "file_name": path.name,
+                "file_size": path.stat().st_size,
+                "modified_at": datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"),
+                "app": "Neko Collection",
+                "version": BACKUP_VERSION,
+                "exported_at": None,
+                "item_count": 0,
+                "upload_file_count": 0,
+                "is_broken": True,
+            })
+    return summaries
+
+
+def create_local_backup_for_day(day_value):
+    target = backup_path_for_date(day_value)
+    with backup_lock:
+        if target.exists():
+            prune_local_backups()
+            return target, False
+        conn = get_conn()
+        try:
+            body = build_backup_archive(conn)
+        finally:
+            conn.close()
+        temp_target = target.with_suffix(".zip.tmp")
+        temp_target.write_bytes(body)
+        temp_target.replace(target)
+        prune_local_backups()
+    return target, True
+
+
+def create_manual_backup():
+    timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+    target = BACKUPS_DIR / f"{BACKUP_FILE_PREFIX}{timestamp}.zip"
+    with backup_lock:
+        conn = get_conn()
+        try:
+            body = build_backup_archive(conn)
+        finally:
+            conn.close()
+        temp_target = target.with_suffix(".zip.tmp")
+        temp_target.write_bytes(body)
+        temp_target.replace(target)
+        prune_local_backups()
+    return target
+
+
+def auto_backup_worker():
+    hour, minute = parse_backup_schedule_time()
+    while True:
+        try:
+            now = datetime.now()
+            if (now.hour, now.minute) >= (hour, minute):
+                target, created = create_local_backup_for_day(now.date())
+                if created:
+                    print(f"[auto-backup] created backup: {target.name}")
+        except Exception as exc:
+            print(f"[auto-backup] failed: {exc}")
+        time.sleep(AUTO_BACKUP_POLL_SECONDS)
+
+
 class NekoHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(FRONTEND_DIR), **kwargs)
@@ -616,7 +887,9 @@ class NekoHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/rates": self.handle_get_rates(); return
         if parsed.path == "/api/items": self.handle_list_items(parsed); return
         if parsed.path == "/api/stats": self.handle_stats(); return
+        if parsed.path == "/api/backups": self.handle_list_backups(); return
         if parsed.path == "/api/export": self.handle_export(); return
+        if parsed.path == "/api/export-backup": self.handle_export_backup(); return
         parts = parsed.path.strip("/").split("/")
         if len(parts) == 3 and parts[0] == "api" and parts[1] == "items":
             self.handle_get_item(parts[2]); return
@@ -628,30 +901,41 @@ class NekoHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/login": self.handle_login(); return
         if parsed.path == "/api/logout": self.handle_logout(); return
         if parsed.path == "/api/items": self.handle_create_item(); return
+        if parsed.path == "/api/clear-data": self.handle_clear_data(); return
+        if parsed.path == "/api/delete-local-backup": self.handle_delete_local_backup(); return
         if parsed.path == "/api/import": self.handle_import(); return
+        if parsed.path == "/api/preview-local-backup": self.handle_preview_local_backup(); return
+        if parsed.path == "/api/preview-backup": self.handle_preview_backup(); return
+        if parsed.path == "/api/restore-local-backup": self.handle_restore_local_backup(); return
+        if parsed.path == "/api/import-backup": self.handle_import_backup(); return
         if parsed.path == "/api/change-password": self.handle_change_password(); return
         if parsed.path == "/api/rates/update": self.handle_update_rates(); return
         if parsed.path == "/api/download-image": self.handle_download_image(); return
-        self.send_json(404, {"error": "Not found"})
+        if parsed.path == "/api/create-backup": self.handle_create_backup(); return
+        self.send_json(404, {"error": "未找到"})
 
     def do_PUT(self):
         parsed = urlparse(self.path)
         parts = parsed.path.strip("/").split("/")
         if len(parts) == 3 and parts[0] == "api" and parts[1] == "items":
             self.handle_update_item(parts[2]); return
-        self.send_json(404, {"error": "Not found"})
+        self.send_json(404, {"error": "未找到"})
 
     def do_DELETE(self):
         parsed = urlparse(self.path)
         parts = parsed.path.strip("/").split("/")
         if len(parts) == 3 and parts[0] == "api" and parts[1] == "items":
             self.handle_delete_item(parts[2]); return
-        self.send_json(404, {"error": "Not found"})
+        self.send_json(404, {"error": "未找到"})
+
+    def read_body(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        return self.rfile.read(length) if length > 0 else b""
 
     def read_json(self):
         try:
-            length = int(self.headers.get("Content-Length", "0"))
-            return json.loads(self.rfile.read(length).decode("utf-8")) if length > 0 else {}
+            body = self.read_body()
+            return json.loads(body.decode("utf-8")) if body else {}
         except Exception: return {}
 
     def send_json(self, status, payload):
@@ -659,6 +943,15 @@ class NekoHandler(SimpleHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_bytes(self, status, content_type, body, filename=None):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        if filename:
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         self.end_headers()
         self.wfile.write(body)
 
@@ -712,6 +1005,13 @@ class NekoHandler(SimpleHTTPRequestHandler):
         with get_conn() as conn:
             rows = conn.execute("SELECT currency, rate_to_cny, updated_at FROM exchange_rates").fetchall()
         self.send_json(200, {"rates": [dict(r) for r in rows]})
+
+    def handle_list_backups(self):
+        if not self.require_auth(): return
+        try:
+            self.send_json(200, {"backups": list_local_backup_summaries()})
+        except Exception as e:
+            self.send_json(500, {"error": str(e)})
 
     def handle_list_items(self, parsed):
         params = parse_qs(parsed.query)
@@ -769,6 +1069,23 @@ class NekoHandler(SimpleHTTPRequestHandler):
             rows = conn.execute("SELECT * FROM collections ORDER BY sort_order, id").fetchall()
         self.send_json(200, {"items": [row_to_item(r) for r in rows]})
 
+    def handle_export_backup(self):
+        if not self.require_auth(): return
+        try:
+            with get_conn() as conn:
+                body = build_backup_archive(conn)
+            self.send_bytes(200, "application/zip", body, f"neko-backup-{now_iso()}.zip")
+        except Exception as e:
+            self.send_json(500, {"error": str(e)})
+
+    def handle_create_backup(self):
+        if not self.require_auth(): return
+        try:
+            target = create_manual_backup()
+            self.send_json(200, {"message": f"备份成功: {target.name}"})
+        except Exception as e:
+            self.send_json(500, {"error": str(e)})
+
     def handle_import(self):
         if not self.require_auth(): return
         items = self.read_json().get("items", [])
@@ -790,7 +1107,114 @@ class NekoHandler(SimpleHTTPRequestHandler):
                 new_item = row_to_item(new_row)
                 new_refs.update(collect_image_refs(new_item.get("image_data"), new_item.get("book_volumes")))
             delete_unused_uploaded_images(conn, old_refs - new_refs)
-        self.send_json(200, {"message": f"Imported {len(items)} items"})
+        self.send_json(200, {"message": f"已导入 {len(items)} 项"})
+
+    def handle_preview_backup(self):
+        if not self.require_auth(): return
+        try:
+            backup = parse_backup_archive(self.read_body())
+            self.send_json(200, {"backup": summarize_backup(backup)})
+        except Exception as e:
+            self.send_json(400, {"error": str(e)})
+
+    def handle_preview_local_backup(self):
+        if not self.require_auth(): return
+        try:
+            filename = str(self.read_json().get("file_name", "")).strip()
+            self.send_json(200, {"backup": summarize_backup_file(local_backup_path(filename))})
+        except FileNotFoundError:
+            self.send_json(404, {"error": "未找到备份文件"})
+        except Exception as e:
+            self.send_json(400, {"error": str(e)})
+
+    def handle_import_backup(self):
+        if not self.require_auth(): return
+        try:
+            backup = parse_backup_archive(self.read_body())
+            items = backup["items"]
+            ts = now_iso()
+            with get_conn() as conn:
+                old_rows = conn.execute("SELECT * FROM collections").fetchall()
+                old_refs = set()
+                for old_row in old_rows:
+                    old_item = row_to_item(old_row)
+                    old_refs.update(collect_image_refs(old_item.get("image_data"), old_item.get("book_volumes")))
+                restore_backup_uploads(backup["uploads"])
+                rates = get_rates_map(conn)
+                conn.execute("DELETE FROM collections")
+                for item in items:
+                    norm = normalize_item_payload(item, rates)
+                    conn.execute("INSERT INTO collections (name, category, series_name, status, platform, purchase_price, purchase_currency, purchase_price_cny, purchase_fx_rate_to_cny, purchase_fx_rate_timestamp, list_price_amount, list_price_currency, list_price_cny, list_fx_rate_to_cny, list_fx_rate_timestamp, book_edition_type, author, publisher, purchase_date, tags, notes, image_data, book_volumes_json, sort_order, created_at, updated_at, is_series, is_private) VALUES (:name, :category, :series_name, :status, :platform, :purchase_price, :purchase_currency, :purchase_price_cny, :purchase_fx_rate_to_cny, :purchase_fx_rate_timestamp, :list_price_amount, :list_price_currency, :list_price_cny, :list_fx_rate_to_cny, :list_fx_rate_timestamp, :book_edition_type, :author, :publisher, :purchase_date, :tags, :notes, :image_data, :book_volumes_json, :sort_order, :created_at, :updated_at, :is_series, :is_private)", {**norm, "created_at": ts, "updated_at": ts})
+                new_rows = conn.execute("SELECT * FROM collections").fetchall()
+                new_refs = set()
+                for new_row in new_rows:
+                    new_item = row_to_item(new_row)
+                    new_refs.update(collect_image_refs(new_item.get("image_data"), new_item.get("book_volumes")))
+                delete_unused_uploaded_images(conn, old_refs - new_refs)
+            self.send_json(200, {"message": f"已从备份恢复 {len(items)} 项"})
+        except Exception as e:
+            self.send_json(400, {"error": str(e)})
+
+    def handle_restore_local_backup(self):
+        if not self.require_auth(): return
+        try:
+            filename = str(self.read_json().get("file_name", "")).strip()
+            backup = parse_backup_archive(local_backup_path(filename).read_bytes())
+            items = backup["items"]
+            ts = now_iso()
+            with get_conn() as conn:
+                old_rows = conn.execute("SELECT * FROM collections").fetchall()
+                old_refs = set()
+                for old_row in old_rows:
+                    old_item = row_to_item(old_row)
+                    old_refs.update(collect_image_refs(old_item.get("image_data"), old_item.get("book_volumes")))
+                restore_backup_uploads(backup["uploads"])
+                rates = get_rates_map(conn)
+                conn.execute("DELETE FROM collections")
+                for item in items:
+                    norm = normalize_item_payload(item, rates)
+                    conn.execute("INSERT INTO collections (name, category, series_name, status, platform, purchase_price, purchase_currency, purchase_price_cny, purchase_fx_rate_to_cny, purchase_fx_rate_timestamp, list_price_amount, list_price_currency, list_price_cny, list_fx_rate_to_cny, list_fx_rate_timestamp, book_edition_type, author, publisher, purchase_date, tags, notes, image_data, book_volumes_json, sort_order, created_at, updated_at, is_series, is_private) VALUES (:name, :category, :series_name, :status, :platform, :purchase_price, :purchase_currency, :purchase_price_cny, :purchase_fx_rate_to_cny, :purchase_fx_rate_timestamp, :list_price_amount, :list_price_currency, :list_price_cny, :list_fx_rate_to_cny, :list_fx_rate_timestamp, :book_edition_type, :author, :publisher, :purchase_date, :tags, :notes, :image_data, :book_volumes_json, :sort_order, :created_at, :updated_at, :is_series, :is_private)", {**norm, "created_at": ts, "updated_at": ts})
+                new_rows = conn.execute("SELECT * FROM collections").fetchall()
+                new_refs = set()
+                for new_row in new_rows:
+                    new_item = row_to_item(new_row)
+                    new_refs.update(collect_image_refs(new_item.get("image_data"), new_item.get("book_volumes")))
+                delete_unused_uploaded_images(conn, old_refs - new_refs)
+            self.send_json(200, {"message": f"已从 {filename} 恢复 {len(items)} 项"})
+        except FileNotFoundError:
+            self.send_json(404, {"error": "未找到备份文件"})
+        except Exception as e:
+            self.send_json(400, {"error": str(e)})
+
+    def handle_delete_local_backup(self):
+        if not self.require_auth(): return
+        try:
+            filename = str(self.read_json().get("file_name", "")).strip()
+            path = local_backup_path(filename)
+            if not path.is_file():
+                self.send_json(404, {"error": "Backup file not found"})
+                return
+            path.unlink()
+            self.send_json(200, {"message": f"备份 {filename} 已成功删除"})
+        except FileNotFoundError:
+            self.send_json(404, {"error": "Backup file not found"})
+        except Exception as e:
+            self.send_json(400, {"error": str(e)})
+
+    def handle_clear_data(self):
+        if not self.require_auth(): return
+        try:
+            with get_conn() as conn:
+                rows = conn.execute("SELECT * FROM collections").fetchall()
+                old_refs = set()
+                for row in rows:
+                    item = row_to_item(row)
+                    old_refs.update(collect_image_refs(item.get("image_data"), item.get("book_volumes")))
+                conn.execute("DELETE FROM collections")
+                delete_unused_uploaded_images(conn, old_refs)
+            self.send_json(200, {"message": "当前数据已清空"})
+        except Exception as e:
+            self.send_json(400, {"error": str(e)})
 
     def handle_change_password(self):
         user = self.require_auth()
@@ -850,7 +1274,7 @@ class NekoHandler(SimpleHTTPRequestHandler):
         with get_conn() as conn:
             row = conn.execute("SELECT * FROM collections WHERE id=?", (item_id,)).fetchone()
             if not row:
-                self.send_json(404, {"error": "Item not found"}); return
+                self.send_json(404, {"error": "未找到项目"}); return
             item = row_to_item(row)
             old_refs = collect_image_refs(item.get("image_data"), item.get("book_volumes"))
             conn.execute("DELETE FROM collections WHERE id=?", (item_id,))
@@ -884,6 +1308,10 @@ class NekoHandler(SimpleHTTPRequestHandler):
 
 def run_server():
     init_db()
+    if AUTO_BACKUP_ENABLED:
+        worker = threading.Thread(target=auto_backup_worker, name="neko-auto-backup", daemon=True)
+        worker.start()
+        print(f"[auto-backup] enabled at {AUTO_BACKUP_TIME}, keep latest {MAX_LOCAL_BACKUPS}")
     server = ThreadingHTTPServer((HOST, PORT), NekoHandler)
     print(f"Neko Collection running at http://{HOST}:{PORT}")
     try: server.serve_forever()

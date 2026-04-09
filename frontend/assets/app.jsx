@@ -84,6 +84,13 @@ function fmtOriginalPrice(amount, currency = "CNY", amountCny = null) {
   const cny = fmtMoney(amountCny);
   return `${code} ${num}${cny === "-" ? "" : ` (约${cny})`}`;
 }
+function fmtFileSize(bytes) {
+  const num = Number(bytes);
+  if (!Number.isFinite(num) || num <= 0) return "-";
+  if (num < 1024) return `${num} B`;
+  if (num < 1024 * 1024) return `${(num / 1024).toFixed(1)} KB`;
+  return `${(num / (1024 * 1024)).toFixed(2)} MB`;
+}
 function statusLabel(status) {
   if (status === "owned") return "已购";
   if (status === "preorder") return "预订";
@@ -275,7 +282,30 @@ function App() {
   const [showVolume, setShowVolume] = useState(false);
   const [showVolumeDetail, setShowVolumeDetail] = useState(false);
   const [showLightbox, setShowLightbox] = useState(false);
+  const [showBackupPreview, setShowBackupPreview] = useState(false);
+  const [showClearDataConfirm, setShowClearDataConfirm] = useState(false);
+  const [showServerBackups, setShowServerBackups] = useState(false);
+  const [backupToDelete, setBackupToDelete] = useState(null);
+  const [showNotification, setShowNotification] = useState(false);
+  const [notificationConfig, setNotificationConfig] = useState({ title: "", message: "", type: "info" });
+  const [confirmConfig, setConfirmConfig] = useState({ show: false, title: "确认", message: "", onConfirm: null });
   const [lightboxSrc, setLightboxSrc] = useState("");
+
+  const notify = (message, title = "提示", type = "info") => {
+    setNotificationConfig({ title, message, type });
+    setShowNotification(true);
+  };
+
+  const askConfirm = (message, onConfirm, title = "确认操作") => {
+    setConfirmConfig({ show: true, title, message, onConfirm });
+  };
+  const [backupPreview, setBackupPreview] = useState(null);
+  const [backupFiles, setBackupFiles] = useState([]);
+  const [isLoadingBackups, setIsLoadingBackups] = useState(false);
+  const [isCreatingBackup, setIsCreatingBackup] = useState(false);
+  const [isRestoringBackup, setIsRestoringBackup] = useState(false);
+  const [isClearingData, setIsClearingData] = useState(false);
+  const [isDeletingBackup, setIsDeletingBackup] = useState(false);
   
   const [loginForm, setLoginForm] = useState({ password: "" });
   const [itemForm, setItemForm] = useState(initialItemForm());
@@ -296,6 +326,7 @@ function App() {
   const barCanvasRef = useRef(null);
   const pieMetaRef = useRef(null);
   const fileInputRef = useRef(null);
+  const pendingBackupBodyRef = useRef(null);
   const loggedIn = Boolean(token && user);
 
   useEffect(() => {
@@ -329,12 +360,34 @@ function App() {
     } catch (e) { console.error(e); }
   }, [apiRequest, isPrivateMode]);
 
+  const refreshBackupFiles = useCallback(async () => {
+    if (!loggedIn) {
+      setBackupFiles([]);
+      return;
+    }
+    try {
+      setIsLoadingBackups(true);
+      const data = await apiRequest(`${API_BASE}/backups`);
+      setBackupFiles(data.backups || []);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsLoadingBackups(false);
+    }
+  }, [apiRequest, loggedIn]);
+
   useEffect(() => {
     if (token && !user) {
       apiRequest(`${API_BASE}/me`).then(d => { if (d.logged_in) setUser(d.user); }).catch(() => {});
     }
     refreshAll();
   }, [token, refreshAll]);
+
+  useEffect(() => {
+    if (showSettings && loggedIn) {
+      refreshBackupFiles();
+    }
+  }, [showSettings, loggedIn, refreshBackupFiles]);
 
   const handleDownloadImage = async (url, type) => {
     if (!url) return;
@@ -348,7 +401,7 @@ function App() {
         setVolumeImageUrlInput("");
       }
     } catch (e) {
-      alert(e.message);
+      notify(e.message, "错误", "error");
     }
   };
 
@@ -451,33 +504,163 @@ function App() {
   const handleSubmitItem = async (e) => {
     e.preventDefault();
     const payload = { ...itemToPayload(itemForm), sort_order: editingItemId ? (items.find(x => x.id === editingItemId)?.sort_order || 0) : 0, book_volumes: itemForm.category === "书籍" ? bookVolumesDraft : [] };
-    if (!payload.name) { alert("请填写名称"); return; }
+    if (!payload.name) { notify("请填写名称", "提示", "info"); return; }
     try {
       await apiRequest(editingItemId ? `${API_BASE}/items/${editingItemId}` : `${API_BASE}/items`, { method: editingItemId ? "PUT" : "POST", body: JSON.stringify(payload) });
       setShowItem(false); await refreshAll();
-    } catch (e) { alert(e.message); }
+    } catch (e) { notify(e.message, "错误", "error"); }
   };
 
   const handleExport = async () => {
     try {
-      const d = await apiRequest(`${API_BASE}/export`);
-      const b = new Blob([JSON.stringify(d, null, 2)], { type: "application/json" }), u = URL.createObjectURL(b), a = document.createElement("a");
-      a.href = u; a.download = `neko-export-${new Date().toISOString().split("T")[0]}.json`; a.click(); URL.revokeObjectURL(u);
-    } catch (e) { alert(e.message); }
+      const headers = token ? { Authorization: `Bearer ${token}` } : {};
+      const response = await fetch(`${API_BASE}/export-backup`, { headers });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        if (response.status === 401) { setToken(""); setUser(null); localStorage.removeItem("neko_token"); }
+        throw new Error(data.error || `Request failed (${response.status})`);
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `neko-backup-${new Date().toISOString().split("T")[0]}.zip`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (e) { notify(e.message, "错误", "error"); }
+  };
+
+  const closeBackupPreview = () => {
+    pendingBackupBodyRef.current = null;
+    setBackupPreview(null);
+    setShowBackupPreview(false);
+    setIsRestoringBackup(false);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  const countCurrentImageRefs = useMemo(() => {
+    const refs = new Set();
+    (items || []).forEach(item => {
+      if (item?.image_data) refs.add(item.image_data);
+      (item?.book_volumes || []).forEach(volume => {
+        if (volume?.cover_image_data) refs.add(volume.cover_image_data);
+      });
+    });
+    return refs.size;
+  }, [items]);
+
+  const confirmBackupImport = async () => {
+    if (!pendingBackupBodyRef.current && backupPreview?.source_type !== "server") {
+      closeBackupPreview();
+      return;
+    }
+    try {
+      setIsRestoringBackup(true);
+      let data;
+      if (backupPreview?.source_type === "server" && backupPreview?.file_name) {
+        data = await apiRequest(`${API_BASE}/restore-local-backup`, { method: "POST", body: JSON.stringify({ file_name: backupPreview.file_name }) });
+      } else {
+        const headers = { "Content-Type": "application/zip", ...(token ? { Authorization: `Bearer ${token}` } : {}) };
+        const response = await fetch(`${API_BASE}/import-backup`, { method: "POST", headers, body: pendingBackupBodyRef.current });
+        data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          if (response.status === 401) { setToken(""); setUser(null); localStorage.removeItem("neko_token"); }
+          throw new Error(data.error || `请求失败 (${response.status})`);
+        }
+      }
+      closeBackupPreview();
+      notify(data.message || "备份已恢复", "成功", "success");
+      await refreshAll();
+      await refreshBackupFiles();
+    } catch (e) {
+      setIsRestoringBackup(false);
+      notify("恢复失败: " + e.message, "错误", "error");
+    }
+  };
+
+  const confirmClearData = async () => {
+    try {
+      setIsClearingData(true);
+      const data = await apiRequest(`${API_BASE}/clear-data`, { method: "POST", body: JSON.stringify({}) });
+      setShowClearDataConfirm(false);
+      setIsClearingData(false);
+      notify(data.message || "当前数据已清空", "成功", "success");
+      await refreshAll();
+    } catch (e) {
+      setIsClearingData(false);
+      notify("清空失败: " + e.message, "错误", "error");
+    }
+  };
+
+  const confirmDeleteBackup = async () => {
+    if (!backupToDelete?.file_name) {
+      setBackupToDelete(null);
+      return;
+    }
+    try {
+      setIsDeletingBackup(true);
+      const data = await apiRequest(`${API_BASE}/delete-local-backup`, { method: "POST", body: JSON.stringify({ file_name: backupToDelete.file_name }) });
+      setBackupToDelete(null);
+      setIsDeletingBackup(false);
+      notify(data.message || "备份已删除", "成功", "success");
+      await refreshBackupFiles();
+    } catch (e) {
+      setIsDeletingBackup(false);
+      notify("删除失败: " + e.message, "错误", "error");
+    }
   };
 
   const handleImport = async (e) => {
     const file = e.target.files?.[0]; if (!file) return;
     try {
-      const data = JSON.parse(await file.text());
-      if (confirm("导入将清空现有数据，确定吗？")) { await apiRequest(`${API_BASE}/import`, { method: "POST", body: JSON.stringify(data) }); alert("成功"); await refreshAll(); }
-    } catch (e) { alert("失败: " + e.message); }
+      const body = await file.arrayBuffer();
+      const headers = { "Content-Type": "application/zip", ...(token ? { Authorization: `Bearer ${token}` } : {}) };
+      const previewResponse = await fetch(`${API_BASE}/preview-backup`, { method: "POST", headers, body });
+      const previewData = await previewResponse.json().catch(() => ({}));
+      if (!previewResponse.ok) {
+        if (previewResponse.status === 401) { setToken(""); setUser(null); localStorage.removeItem("neko_token"); }
+        throw new Error(previewData.error || `请求失败 (${previewResponse.status})`);
+      }
+      const preview = previewData.backup || {};
+      pendingBackupBodyRef.current = body;
+      setBackupPreview({ ...preview, file_name: file.name, file_size: file.size, source_type: "upload" });
+      setShowBackupPreview(true);
+    } catch (e) { notify("恢复失败: " + e.message, "错误", "error"); }
     e.target.value = "";
   };
 
+  const openLocalBackupPreview = async (fileName) => {
+    try {
+      const data = await apiRequest(`${API_BASE}/preview-local-backup`, { method: "POST", body: JSON.stringify({ file_name: fileName }) });
+      pendingBackupBodyRef.current = null;
+      setBackupPreview({ ...(data.backup || {}), source_type: "server" });
+      setShowBackupPreview(true);
+    } catch (e) {
+      notify("预览失败: " + e.message, "错误", "error");
+    }
+  };
+
   const handleUpdateRates = async () => {
-    try { await apiRequest(`${API_BASE}/rates/update`, { method: "POST" }); alert("汇率更新成功"); await refreshAll(); }
-    catch (e) { alert(e.message); }
+    try { await apiRequest(`${API_BASE}/rates/update`, { method: "POST" }); notify("汇率更新成功", "成功", "success"); await refreshAll(); }
+    catch (e) { notify(e.message, "错误", "error"); }
+  };
+
+  const handleCreateBackup = async () => {
+    try {
+      setIsCreatingBackup(true);
+      const data = await apiRequest(`${API_BASE}/create-backup`, { method: "POST" });
+      notify(data.message || "备份成功", "成功", "success");
+      await refreshBackupFiles();
+    } catch (e) {
+      notify("备份失败: " + e.message, "错误", "error");
+    } finally {
+      setIsCreatingBackup(false);
+    }
+  };
+
+  const handleDeleteBackup = (fileName) => {
+    const file = backupFiles.find(f => f.file_name === fileName);
+    if (file) setBackupToDelete(file);
   };
 
   const openVolumeModal = (index = null) => {
@@ -495,7 +678,7 @@ function App() {
     try {
       await apiRequest(`${API_BASE}/items/${selectedItem.id}`, { method: "PUT", body: JSON.stringify(itemToPayload({ ...selectedItem, book_volumes: vols })) });
       setShowVolume(false); await refreshAll();
-    } catch (e) { alert(e.message); }
+    } catch (e) { notify(e.message, "错误", "error"); }
   };
 
   const handleResize = (index, e) => {
@@ -663,8 +846,17 @@ function App() {
                   </button>
                 </div>
               </section>
-              <section><h4>修改密码</h4><div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}><input type="password" placeholder="新密码" value={newPassword} onChange={e => setNewPassword(e.target.value)} style={{ flex: 1, padding: "0.5rem", borderRadius: "8px", border: "1px solid var(--line)" }} /><button className="btn primary small" onClick={async () => { if (newPassword.length < 6) { alert("至少6位"); return; } await apiRequest(`${API_BASE}/change-password`, { method: "POST", body: JSON.stringify({ new_password: newPassword }) }); alert("成功"); setNewPassword(""); }}>修改</button></div></section>
-              <section><h4>数据备份与恢复</h4><div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}><button className="btn ghost small" onClick={handleExport}>导出 JSON</button><button className="btn ghost small" onClick={() => fileInputRef.current?.click()}>导入 JSON</button><input type="file" ref={fileInputRef} hidden accept=".json" onChange={handleImport} /></div></section>
+              <section><h4>修改密码</h4><div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem" }}><input type="password" placeholder="新密码" value={newPassword} onChange={e => setNewPassword(e.target.value)} style={{ flex: 1, padding: "0.5rem", borderRadius: "8px", border: "1px solid var(--line)" }} /><button className="btn primary small" onClick={async () => { if (newPassword.length < 6) { notify("至少6位", "提示", "info"); return; } try { await apiRequest(`${API_BASE}/change-password`, { method: "POST", body: JSON.stringify({ new_password: newPassword }) }); notify("修改成功", "成功", "success"); setNewPassword(""); } catch (e) { notify(e.message, "错误", "error"); } }}>修改</button></div></section>
+              <section>
+                <h4>备份与恢复</h4>
+                <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem", flexWrap: "wrap" }}>
+                  <button className="btn ghost small" onClick={handleExport}>导出 ZIP</button>
+                  <button className="btn ghost small" onClick={() => fileInputRef.current?.click()}>导入 ZIP</button>
+                  <button className="btn ghost small" onClick={() => setShowServerBackups(true)}>服务器备份</button>
+                  <button className="btn danger small" onClick={() => setShowClearDataConfirm(true)}>清空当前数据</button>
+                  <input type="file" ref={fileInputRef} hidden accept=".zip,application/zip" onChange={handleImport} />
+                </div>
+              </section>
               <section>
                 <h4>汇率更新</h4>
                 <div style={{ background: "var(--surface-2)", padding: "1.25rem", borderRadius: "16px", border: "1px solid var(--line)", marginTop: "0.75rem" }}>
@@ -701,11 +893,179 @@ function App() {
         </div>
       )}
 
+      {showClearDataConfirm && (
+        <div className="modal" style={{ zIndex: 3200 }} onMouseDown={e => e.target === e.currentTarget && !isClearingData && setShowClearDataConfirm(false)}>
+          <div className="modal-card small" style={{ maxWidth: "520px" }} onMouseDown={e => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>清空当前数据</h3>
+              <button className="icon-btn" onClick={() => setShowClearDataConfirm(false)} disabled={isClearingData}>×</button>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+              <div style={{ padding: "1rem 1.1rem", borderRadius: "18px", background: "rgba(248,113,113,0.12)", border: "1px solid rgba(248,113,113,0.28)", color: "var(--text-soft)", lineHeight: 1.6 }}>
+                此操作将永久删除当前所有收藏记录，并清理不再被引用的图片文件。
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: "0.75rem" }}>
+                <div style={{ padding: "0.95rem 0.8rem", borderRadius: "16px", background: "var(--surface-2)", border: "1px solid var(--line)", textAlign: "center" }}>
+                  <div style={{ fontSize: "0.74rem", color: "var(--muted)", marginBottom: "0.35rem" }}>藏品数量</div>
+                  <div style={{ fontSize: "1.55rem", fontWeight: 800, color: "#fb7185" }}>{items.length}</div>
+                </div>
+                <div style={{ padding: "0.95rem 0.8rem", borderRadius: "16px", background: "var(--surface-2)", border: "1px solid var(--line)", textAlign: "center" }}>
+                  <div style={{ fontSize: "0.74rem", color: "var(--muted)", marginBottom: "0.35rem" }}>图片数量</div>
+                  <div style={{ fontSize: "1.55rem", fontWeight: 800, color: "#f97316" }}>{countCurrentImageRefs}</div>
+                </div>
+              </div>
+              <div style={{ padding: "1rem 1.1rem", borderRadius: "18px", background: "var(--surface-2)", border: "1px solid var(--line)", color: "var(--text-soft)", lineHeight: 1.6 }}>
+                请确认您要清空当前数据集。除非您从备份中恢复，否则此操作无法撤销。
+              </div>
+              <div className="form-actions">
+                <button type="button" className="btn ghost" onClick={() => setShowClearDataConfirm(false)} disabled={isClearingData}>取消</button>
+                <button type="button" className="btn danger" onClick={confirmClearData} disabled={isClearingData}>
+                  {isClearingData ? "正在清空..." : "确认清空"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {backupToDelete && (
+        <div className="modal" style={{ zIndex: 3300 }} onMouseDown={e => e.target === e.currentTarget && !isDeletingBackup && setBackupToDelete(null)}>
+          <div className="modal-card small" style={{ maxWidth: "520px" }} onMouseDown={e => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>删除服务器备份</h3>
+              <button className="icon-btn" onClick={() => setBackupToDelete(null)} disabled={isDeletingBackup}>×</button>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+              <div style={{ padding: "1rem 1.1rem", borderRadius: "18px", background: "rgba(248,113,113,0.12)", border: "1px solid rgba(248,113,113,0.28)", color: "var(--text-soft)", lineHeight: 1.6 }}>
+                此操作将永久删除所选的服务器备份文件。删除后无法恢复。
+              </div>
+              <div style={{ padding: "1rem 1.1rem", borderRadius: "18px", background: "var(--surface-2)", border: "1px solid var(--line)" }}>
+                <div style={{ fontSize: "0.78rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: "0.45rem" }}>备份文件</div>
+                <div style={{ fontSize: "1rem", fontWeight: 800, color: "var(--text)", wordBreak: "break-all" }}>{backupToDelete.file_name}</div>
+                <div style={{ display: "flex", gap: "0.85rem", flexWrap: "wrap", marginTop: "0.45rem", fontSize: "0.82rem", color: "var(--muted)" }}>
+                  <span>{fmtFileSize(backupToDelete.file_size)}</span>
+                  <span>{backupToDelete.exported_at || backupToDelete.modified_at || "-"}</span>
+                  <span>{backupToDelete.item_count ?? 0} 项</span>
+                  <span>{backupToDelete.upload_file_count ?? 0} 图片</span>
+                </div>
+              </div>
+              <div className="form-actions">
+                <button type="button" className="btn ghost" onClick={() => setBackupToDelete(null)} disabled={isDeletingBackup}>取消</button>
+                <button type="button" className="btn danger" onClick={confirmDeleteBackup} disabled={isDeletingBackup}>
+                  {isDeletingBackup ? "正在删除..." : "确认删除"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showBackupPreview && backupPreview && (
+        <div className="modal" style={{ zIndex: 3400 }} onMouseDown={e => e.target === e.currentTarget && !isRestoringBackup && closeBackupPreview()}>
+          <div className="modal-card small" style={{ maxWidth: "560px" }} onMouseDown={e => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>备份预览</h3>
+              <button className="icon-btn" onClick={closeBackupPreview} disabled={isRestoringBackup}>×</button>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+              <div style={{ padding: "1rem 1.1rem", borderRadius: "18px", background: "linear-gradient(135deg, rgba(74,209,255,0.16), rgba(255,133,161,0.12))", border: "1px solid var(--line)" }}>
+                <div style={{ fontSize: "0.78rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: "0.45rem" }}>已选文件</div>
+                <div style={{ fontSize: "1rem", fontWeight: 800, color: "var(--text)", wordBreak: "break-all" }}>{backupPreview.file_name || "backup.zip"}</div>
+                <div style={{ marginTop: "0.35rem", color: "var(--muted)", fontSize: "0.85rem" }}>{fmtFileSize(backupPreview.file_size)}</div>
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: "0.75rem" }}>
+                <div style={{ padding: "0.95rem 0.8rem", borderRadius: "16px", background: "var(--surface-2)", border: "1px solid var(--line)", textAlign: "center" }}>
+                  <div style={{ fontSize: "0.74rem", color: "var(--muted)", marginBottom: "0.35rem" }}>藏品总数</div>
+                  <div style={{ fontSize: "1.55rem", fontWeight: 800, color: "#4ad1ff" }}>{backupPreview.item_count ?? 0}</div>
+                </div>
+                <div style={{ padding: "0.95rem 0.8rem", borderRadius: "16px", background: "var(--surface-2)", border: "1px solid var(--line)", textAlign: "center" }}>
+                  <div style={{ fontSize: "0.74rem", color: "var(--muted)", marginBottom: "0.35rem" }}>图片数量</div>
+                  <div style={{ fontSize: "1.55rem", fontWeight: 800, color: "#ff85a1" }}>{backupPreview.upload_file_count ?? 0}</div>
+                </div>
+                <div style={{ padding: "0.95rem 0.8rem", borderRadius: "16px", background: "var(--surface-2)", border: "1px solid var(--line)", textAlign: "center" }}>
+                  <div style={{ fontSize: "0.74rem", color: "var(--muted)", marginBottom: "0.35rem" }}>版本号</div>
+                  <div style={{ fontSize: "1.55rem", fontWeight: 800, color: "#fbbf24" }}>{backupPreview.version ?? 1}</div>
+                </div>
+              </div>
+
+              <div style={{ padding: "1rem 1.1rem", borderRadius: "18px", background: "var(--surface-2)", border: "1px solid var(--line)" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: "1rem", flexWrap: "wrap" }}>
+                  <div>
+                    <div style={{ fontSize: "0.78rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.08em" }}>备份应用</div>
+                    <div style={{ marginTop: "0.35rem", fontWeight: 700, color: "var(--text)" }}>{backupPreview.app || "Neko Collection"}</div>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div style={{ fontSize: "0.78rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.08em" }}>备份日期</div>
+                    <div style={{ marginTop: "0.35rem", fontWeight: 700, color: "var(--text)" }}>{backupPreview.exported_at || "-"}</div>
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ padding: "0.95rem 1rem", borderRadius: "18px", background: "rgba(251,191,36,0.12)", border: "1px solid rgba(251,191,36,0.28)", color: "var(--text-soft)", lineHeight: 1.6 }}>
+                恢复此备份将替换当前的收藏数据，并同步压缩包中的相关图片文件。
+              </div>
+
+              <div className="form-actions">
+                <button type="button" className="btn ghost" onClick={closeBackupPreview} disabled={isRestoringBackup}>取消</button>
+                <button type="button" className="btn primary" onClick={confirmBackupImport} disabled={isRestoringBackup}>
+                  {isRestoringBackup ? "正在恢复..." : "确认恢复备份"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showServerBackups && (
+        <div className="modal" onMouseDown={e => e.target === e.currentTarget && setShowServerBackups(false)}>
+          <div className="modal-card small" style={{ maxWidth: "600px" }} onMouseDown={e => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>服务器备份</h3>
+              <button className="icon-btn" onClick={() => setShowServerBackups(false)}>×</button>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem" }}>
+                <button className="btn primary small" onClick={handleCreateBackup} disabled={isCreatingBackup}>
+                  {isCreatingBackup ? "备份中..." : "立即备份"}
+                </button>
+                <button className="btn ghost small" onClick={refreshBackupFiles} disabled={isLoadingBackups}>
+                  {isLoadingBackups ? "加载中..." : "刷新列表"}
+                </button>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", maxHeight: "60vh", overflowY: "auto", paddingRight: "4px" }}>
+                {backupFiles.length ? backupFiles.map(file => (
+                  <div key={file.file_name} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "1rem", padding: "0.95rem 1rem", borderRadius: "16px", background: "var(--surface-2)", border: "1px solid var(--line)" }}>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ fontWeight: 800, color: "var(--text)", wordBreak: "break-all" }}>{file.file_name}</div>
+                      <div style={{ display: "flex", gap: "0.85rem", flexWrap: "wrap", marginTop: "0.35rem", fontSize: "0.82rem", color: "var(--muted)" }}>
+                        <span>{fmtFileSize(file.file_size)}</span>
+                        <span>{file.exported_at || file.modified_at || "-"}</span>
+                        <span>{file.item_count ?? 0} 项</span>
+                        <span>{file.upload_file_count ?? 0} 图片</span>
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: "0.5rem" }}>
+                      <button className="btn primary small" onClick={() => { setShowServerBackups(false); openLocalBackupPreview(file.file_name); }} disabled={Boolean(file.is_broken)}>恢复</button>
+                      <button className="btn ghost danger small" onClick={() => handleDeleteBackup(file.file_name)}>删除</button>
+                    </div>
+                  </div>
+                )) : (
+                  <div style={{ padding: "1rem 1.1rem", borderRadius: "16px", background: "var(--surface-2)", border: "1px dashed var(--line)", color: "var(--muted)" }}>
+                    {isLoadingBackups ? "正在加载服务器备份..." : "尚无服务器备份。"}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showLogin && (
         <div className="modal" onMouseDown={e => e.target === e.currentTarget && setShowLogin(false)}>
           <div className="modal-card small" onMouseDown={e => e.stopPropagation()}>
             <div className="modal-head"><h3>登录</h3><button className="icon-btn" onClick={() => setShowLogin(false)}>×</button></div>
-            <form className="form-grid one-col" onSubmit={async e => { e.preventDefault(); try { const d = await apiRequest(`${API_BASE}/login`, { method: "POST", body: JSON.stringify(loginForm) }); setToken(d.token); setUser(d.user); localStorage.setItem("neko_token", d.token); setShowLogin(false); setLoginForm({ password: "" }); } catch (e) { alert(e.message); } }}>
+            <form className="form-grid one-col" onSubmit={async e => { e.preventDefault(); try { const d = await apiRequest(`${API_BASE}/login`, { method: "POST", body: JSON.stringify(loginForm) }); setToken(d.token); setUser(d.user); localStorage.setItem("neko_token", d.token); setShowLogin(false); setLoginForm({ password: "" }); notify("登录成功", "成功", "success"); } catch (e) { notify(e.message, "错误", "error"); } }}>
               <label>密码<input type="password" value={loginForm.password} onChange={e => setLoginForm({ password: e.target.value })} required /></label>
               <div className="form-actions"><button type="submit" className="btn primary">登录</button></div>
             </form>
@@ -967,7 +1327,7 @@ function App() {
                     <div className="volume-cell">{fmtPlatform(v.platform)}</div>
                     <div className="volume-cell"><span className={`status-badge ${statusClass(v.purchase_status)}`}>{statusLabel(v.purchase_status)}</span></div>
                     <div className="volume-cell volume-row-actions" onClick={e => e.stopPropagation()}>
-                      {loggedIn && <><button className="action-icon-btn" onClick={() => openVolumeModal(i)}>✎</button><button className="action-icon-btn danger" onClick={async () => { if (confirm("确定删除？")) { const nv = [...selectedItem.book_volumes]; nv.splice(i, 1); await apiRequest(`${API_BASE}/items/${selectedItem.id}`, { method: "PUT", body: JSON.stringify(itemToPayload({ ...selectedItem, book_volumes: nv })) }); await refreshAll(); } }}>🗑</button></>}
+                      {loggedIn && <><button className="action-icon-btn" onClick={() => openVolumeModal(i)}>✎</button><button className="action-icon-btn danger" onClick={() => askConfirm("确定要删除这个分册吗？", async () => { const nv = [...selectedItem.book_volumes]; nv.splice(i, 1); await apiRequest(`${API_BASE}/items/${selectedItem.id}`, { method: "PUT", body: JSON.stringify(itemToPayload({ ...selectedItem, book_volumes: nv })) }); await refreshAll(); })}>🗑</button></>}
                     </div>
                   </div>
                 ))}
@@ -976,7 +1336,7 @@ function App() {
                 </div>
               )}
             </div>
-            <div className="item-actions top-gap">{loggedIn && <><button className="btn ghost" onClick={() => { setShowDetail(false); openEditItem(selectedItem); }}>编辑</button><button className="btn ghost danger" onClick={async () => { if (confirm("确定删除？")) { await apiRequest(`${API_BASE}/items/${selectedItem.id}`, { method: "DELETE" }); setShowDetail(false); await refreshAll(); } }}>删除</button></>}</div>
+            <div className="item-actions top-gap">{loggedIn && <><button className="btn ghost" onClick={() => { setShowDetail(false); openEditItem(selectedItem); }}>编辑</button><button className="btn ghost danger" onClick={() => askConfirm("确定要永久删除这个藏品吗？", async () => { await apiRequest(`${API_BASE}/items/${selectedItem.id}`, { method: "DELETE" }); setShowDetail(false); await refreshAll(); })}>删除</button></>}</div>
           </div>
         </div>
       )}
@@ -1107,6 +1467,45 @@ function App() {
         </div>
       )}
       {showLightbox && <Lightbox src={lightboxSrc} onClose={() => setShowLightbox(false)} />}
+      
+      {showNotification && (
+        <div className="modal" style={{ zIndex: 4000 }} onMouseDown={e => e.target === e.currentTarget && setShowNotification(false)}>
+          <div className="modal-card small notification-modal" style={{ maxWidth: "420px" }} onMouseDown={e => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3 style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                {notificationConfig.type === "success" && "✅"}
+                {notificationConfig.type === "error" && "❌"}
+                {notificationConfig.type === "info" && "ℹ️"}
+                {notificationConfig.title}
+              </h3>
+              <button className="icon-btn" onClick={() => setShowNotification(false)}>×</button>
+            </div>
+            <div style={{ padding: "1rem 0", color: "var(--text-soft)", lineHeight: 1.6, textAlign: "center", fontSize: "1.05rem" }}>
+              {notificationConfig.message}
+            </div>
+            <div className="form-actions" style={{ justifyContent: "center", marginTop: "1rem" }}>
+              <button className="btn primary" onClick={() => setShowNotification(false)} style={{ minWidth: "100px" }}>确定</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {confirmConfig.show && (
+        <div className="modal" style={{ zIndex: 5000 }} onMouseDown={e => e.target === e.currentTarget && setConfirmConfig({ ...confirmConfig, show: false })}>
+          <div className="modal-card small" style={{ maxWidth: "420px" }} onMouseDown={e => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>{confirmConfig.title}</h3>
+              <button className="icon-btn" onClick={() => setConfirmConfig({ ...confirmConfig, show: false })}>×</button>
+            </div>
+            <div style={{ padding: "1.5rem 0", color: "var(--text-soft)", lineHeight: 1.6, textAlign: "center", fontSize: "1.05rem" }}>
+              {confirmConfig.message}
+            </div>
+            <div className="form-actions" style={{ justifyContent: "center", gap: "1rem" }}>
+              <button className="btn ghost" onClick={() => setConfirmConfig({ ...confirmConfig, show: false })} style={{ minWidth: "100px" }}>取消</button>
+              <button className="btn primary" onClick={() => { confirmConfig.onConfirm?.(); setConfirmConfig({ ...confirmConfig, show: false }); }} style={{ minWidth: "100px" }}>确定</button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
