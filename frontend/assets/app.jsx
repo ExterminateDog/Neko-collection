@@ -268,6 +268,7 @@ function App() {
   const [stats, setStats] = useState({ events: [] });
   const [rates, setRates] = useState([]);
   const [selectedYear, setSelectedYear] = useState("all");
+  const [viewMode, setViewMode] = useState(localStorage.getItem("neko_view_mode") || "grid");
   const [pieTooltip, setPieTooltip] = useState(null);
   const [isDarkMode, setIsDarkMode] = useState(localStorage.getItem("neko_theme") === "dark");
   const [isPrivateMode, setIsPrivateMode] = useState(localStorage.getItem("neko_private_mode") === "true");
@@ -728,40 +729,118 @@ function App() {
             </div>
             <div className="filter-row">
               <div className="filter-left">
-                <div className="filter-group"><span className="filter-label">状态</span>
-                  <div className="status-filters">{["owned", "preorder", "wishlist"].map(s => <button key={s} className={`status-chip ${statusFilter === s ? "active" : ""}`} onClick={() => setStatusFilter(statusFilter === s ? "" : s)}>{statusLabel(s)}</button>)}</div>
-                </div>
-                <div className="filter-group"><span className="filter-label">分类</span>
-                  <div className="category-filters">{categoryOptions.map(c => <button key={c} className={`category-chip ${categoryFilter === c ? "active" : ""}`} onClick={() => setCategoryFilter(categoryFilter === c ? "" : c)}>{c}</button>)}</div>
-                </div>
+                <div className="filter-group-inline"><span className="filter-label-inline">状态</span><div className="status-filters">{["owned", "preorder", "wishlist"].map(s => <button key={s} className={`status-chip ${statusFilter === s ? "active" : ""}`} onClick={() => setStatusFilter(statusFilter === s ? "" : s)}>{statusLabel(s)}</button>)}</div></div>
+                <div className="filter-divider-pipe">|</div>
+                <div className="filter-group-inline"><span className="filter-label-inline">分类</span><div className="category-filters">{categoryOptions.map(c => <button key={c} className={`category-chip ${categoryFilter === c ? "active" : ""}`} onClick={() => setCategoryFilter(categoryFilter === c ? "" : c)}>{c}</button>)}</div></div>
               </div>
-              <label className="search-wrap"><input type="search" value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder="搜索名称 / 标签 / 平台" /></label>
+              <div className="filter-right">
+                <div className="view-toggle">
+                  <button 
+                    className={`view-toggle-btn ${viewMode === "grid" ? "active" : ""}`} 
+                    onClick={() => { setViewMode("grid"); localStorage.setItem("neko_view_mode", "grid"); }}
+                    title="网格视图"
+                  >
+                    田
+                  </button>
+                  <button 
+                    className={`view-toggle-btn ${viewMode === "list" ? "active" : ""}`} 
+                    onClick={() => { setViewMode("list"); localStorage.setItem("neko_view_mode", "list"); }}
+                    title="列表视图"
+                  >
+                    ≡
+                  </button>
+                </div>
+                <label className="search-wrap"><input type="search" value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder="搜索名称 / 标签 / 平台" /></label>
+              </div>
             </div>
-            <div className="collection-grid">
-              {!filteredItems.length ? <div className="empty-state">暂无数据</div> : filteredItems.map(item => (
-                <article key={item.id} className="item-card" onClick={async () => { await apiRequest(`${API_BASE}/items/${item.id}`).then(d => { setSelectedItem(d.item); setShowDetail(true); }); }}>
-                  <div className="item-image-wrap">
-                    {item.image_data ? <img className="item-image" src={item.image_data} alt={item.name} /> : <div className="item-placeholder">N</div>}
-                    {item.is_private && <div className="private-badge">🔒 私密</div>}
-                  </div>
-                  <div className="item-body">
-                    <h3 className="item-title">{item.series_name || item.name}</h3>
-                    <div className="category-progress-row"><span className="item-sub">{item.category === "书籍" ? "📚 " : "✨ "}{item.category}</span>
-                      {item.category === "书籍" && (item.book_volumes || []).length > 0 && (() => {
-                        const owned = item.book_volumes.filter(v => v.purchase_status === "owned").length, total = item.book_volumes.length;
-                        return <div className="inline-progress"><div className="progress-bar-bg"><div className="progress-bar-fill" style={{ width: `${(owned/total)*100}%` }}></div></div><span className="progress-text">{owned}/{total}</span></div>
-                      })()}
-                    </div>
-                    <div className="price-status-row"><strong>{fmtMoney(item.category === "书籍" ? item.total_spent_cny : item.purchase_price)}</strong><span className={`status-pill ${statusClass(item.status)}`}>{statusLabel(item.status)}</span></div>
-                    {item.tags?.length > 0 && (
-                      <div className="item-tags-row" style={{ marginTop: "0.25rem" }}>
-                        {item.tags.slice(0, 3).map((t, i) => <span key={i} className="item-tag-sm">{t}</span>)}
-                        {item.tags.length > 3 && <span className="item-tag-sm">...</span>}
+            <div className={viewMode === "grid" ? "collection-grid" : "collection-list"}>
+              {!filteredItems.length ? <div className="empty-state">暂无数据</div> : (
+                viewMode === "grid" ? (
+                  filteredItems.map(item => (
+                    <article key={item.id} className="item-card" onClick={async () => { await apiRequest(`${API_BASE}/items/${item.id}`).then(d => { setSelectedItem(d.item); setShowDetail(true); }); }}>
+                      <div className="item-image-wrap">
+                        {item.image_data ? <img className="item-image" src={item.image_data} alt={item.name} /> : <div className="item-placeholder">N</div>}
                       </div>
-                    )}
+                      <div className="item-body">
+                        <h3 className="item-title">{item.series_name || item.name}</h3>
+                        <div className="category-progress-row">
+                          <div className="item-category-group">
+                            {item.category === "书籍" ? "📚 " : "✨ "}{item.category}
+                          </div>
+                          <div className="item-meta-group">
+                            {item.is_private && <span className="private-badge">🔒 私密</span>}
+                            {item.category === "书籍" && (item.book_volumes || []).length > 0 && (() => {
+                              const owned = item.book_volumes.filter(v => v.purchase_status === "owned").length, total = item.book_volumes.length;
+                              return (
+                                <div className="inline-progress">
+                                  <div className="progress-bar-bg"><div className="progress-bar-fill" style={{ width: `${(owned/total)*100}%` }}></div></div>
+                                  <span className="progress-text">{owned}/{total}</span>
+                                </div>
+                              );
+                            })()}
+                          </div>
+                        </div>
+                        <div className="price-status-row"><strong>{fmtMoney(item.category === "书籍" ? item.total_spent_cny : item.purchase_price)}</strong><span className={`status-pill ${statusClass(item.status)}`}>{statusLabel(item.status)}</span></div>
+                        {item.tags?.length > 0 && (
+                          <div className="item-tags-row" style={{ marginTop: "0.25rem" }}>
+                            {item.tags.slice(0, 3).map((t, i) => <span key={i} className="item-tag-sm">{t}</span>)}
+                            {item.tags.length > 3 && <span className="item-tag-sm">...</span>}
+                          </div>
+                        )}
+                      </div>
+                    </article>
+                  ))
+                ) : (
+                  <div className="list-view-table">
+                    <div className="list-view-header">
+                      <div className="lv-col col-img"></div>
+                      <div className="lv-col col-name">名称</div>
+                      <div className="lv-col col-tags">标签</div>
+                      <div className="lv-col col-price">购买价</div>
+                      <div className="lv-col col-list">定价</div>
+                      <div className="lv-col col-diff">盈亏</div>
+                      <div className="lv-col col-status">状态</div>
+                    </div>
+                    {filteredItems.map(item => (
+                      <div key={item.id} className="list-view-row" onClick={async () => { await apiRequest(`${API_BASE}/items/${item.id}`).then(d => { setSelectedItem(d.item); setShowDetail(true); }); }}>
+                        <div className="lv-col col-img">
+                          {item.image_data ? <img src={item.image_data} alt={item.name} /> : <div className="lv-img-placeholder">N</div>}
+                        </div>
+                        <div className="lv-col col-name">
+                          <div className="lv-name-wrap">
+                            <div className="lv-name-text">{item.series_name || item.name}</div>
+                            <div className="item-meta-group inline">
+                              {item.is_private && <span className="private-badge mini">🔒 私密</span>}
+                              {item.category === "书籍" && (item.book_volumes || []).length > 0 && (() => {
+                                const owned = item.book_volumes.filter(v => v.purchase_status === "owned").length, total = item.book_volumes.length;
+                                return (
+                                  <div className="inline-progress">
+                                    <div className="progress-bar-bg"><div className="progress-bar-fill" style={{ width: `${(owned/total)*100}%` }}></div></div>
+                                    <span className="progress-text">{owned}/{total}</span>
+                                  </div>
+                                );
+                              })()}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="lv-col col-tags">
+                          {item.tags?.length > 0 ? item.tags.slice(0, 2).map((t, i) => <span key={i} className="item-tag-sm">{t}</span>) : "-"}
+                        </div>
+                        <div className="lv-col col-price"><strong>{fmtMoney(item.category === "书籍" ? item.total_spent_cny : item.purchase_price)}</strong></div>
+                        <div className="lv-col col-list">{fmtMoney(item.list_price_cny)}</div>
+                        <div className="lv-col col-diff">
+                          {item.status === "owned" && item.list_price_cny > 0 ? (() => {
+                            const cost = item.category === "书籍" ? item.total_spent_cny : item.purchase_price;
+                            const diff = item.list_price_cny - cost;
+                            return <span className={diff >= 0 ? "diff-positive" : "diff-negative"}>{fmtSignedMoney(diff)}</span>;
+                          })() : "-"}
+                        </div>
+                        <div className="lv-col col-status"><span className={`status-pill small ${statusClass(item.status)}`}>{statusLabel(item.status)}</span></div>
+                      </div>
+                    ))}
                   </div>
-                </article>
-              ))}
+                )
+              )}
             </div>
           </div>
         </section>
@@ -1065,7 +1144,7 @@ function App() {
         <div className="modal" onMouseDown={e => e.target === e.currentTarget && setShowLogin(false)}>
           <div className="modal-card small" onMouseDown={e => e.stopPropagation()}>
             <div className="modal-head"><h3>登录</h3><button className="icon-btn" onClick={() => setShowLogin(false)}>×</button></div>
-            <form className="form-grid one-col" onSubmit={async e => { e.preventDefault(); try { const d = await apiRequest(`${API_BASE}/login`, { method: "POST", body: JSON.stringify(loginForm) }); setToken(d.token); setUser(d.user); localStorage.setItem("neko_token", d.token); setShowLogin(false); setLoginForm({ password: "" }); notify("登录成功", "成功", "success"); } catch (e) { notify(e.message, "错误", "error"); } }}>
+            <form className="form-grid one-col" onSubmit={async e => { e.preventDefault(); try { const d = await apiRequest(`${API_BASE}/login`, { method: "POST", body: JSON.stringify(loginForm) }); setToken(d.token); setUser(d.user); localStorage.setItem("neko_token", d.token); setShowLogin(false); setLoginForm({ password: "" }); } catch (e) { notify(e.message, "错误", "error"); } }}>
               <label>密码<input type="password" value={loginForm.password} onChange={e => setLoginForm({ password: e.target.value })} required /></label>
               <div className="form-actions"><button type="submit" className="btn primary">登录</button></div>
             </form>

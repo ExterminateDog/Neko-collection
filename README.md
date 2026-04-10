@@ -54,23 +54,26 @@ npm run build
 ```
 
 ### 4. 运行系统
-你可以通过 PowerShell 脚本快速启动：
+你可以通过脚本快速启动：
 
-- **本地访问**:
-  ```powershell
-  .\run-local.ps1
+- **Windows**:
+  ```cmd
+  .\run-windows.cmd [local|lan]
   ```
-  访问地址: [http://127.0.0.1:8765](http://127.0.0.1:8765)
+  - `local`: 访问地址 [http://127.0.0.1:8765](http://127.0.0.1:8765)
+  - `lan`: 允许同一网络下的其他设备访问 (默认)。
 
-- **局域网访问**:
-  ```powershell
-  .\run-lan.ps1
+- **Linux / macOS**:
+  ```bash
+  chmod +x run-linux.sh
+  ./run-linux.sh [local|lan]
   ```
-  允许同一网络下的其他设备通过你的 IP 地址访问。
+  - `local`: 访问地址 [http://127.0.0.1:8765](http://127.0.0.1:8765) (默认)
+  - `lan`: 允许同一网络下的其他设备访问。
 
 **手动启动后端:**
 ```bash
-python .\backend\server.py
+python ./backend/server.py
 ```
 
 ---
@@ -96,8 +99,8 @@ E:\CodeX\Neko-collection\
 │   └── ...
 ├── docs/               # 项目文档与更新记录
 ├── package.json        # 前端依赖与构建脚本 (esbuild)
-├── run-local.ps1       # 本地运行脚本 (127.0.0.1)
-└── run-lan.ps1         # 局域网运行脚本 (0.0.0.0)
+├── run-windows.cmd     # Windows 运行脚本 (支持 local/lan 模式)
+└── run-linux.sh        # Linux/macOS 运行脚本 (支持 local/lan 模式)
 ```
 
 ---
