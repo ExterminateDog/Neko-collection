@@ -7,6 +7,7 @@ import json
 import os
 import secrets
 import sqlite3
+import sys
 import threading
 import time
 import zipfile
@@ -124,6 +125,26 @@ def get_conn() -> sqlite3.Connection:
     return conn
 
 
+def parse_startup_options(argv=None):
+    args = list(sys.argv[1:] if argv is None else argv)
+    options = {"admin_password": None}
+    i = 0
+    while i < len(args):
+        arg = str(args[i]).strip()
+        if arg in {"-pw", "--password"}:
+            if i + 1 >= len(args):
+                raise ValueError("-pw ?????????")
+            options["admin_password"] = args[i + 1]
+            i += 2
+            continue
+        if arg in {"-h", "--help"}:
+            print("Usage: python backend/server.py [-pw <initial_password>]")
+            print("Note: -pw only applies when the admin user is created for the first time.")
+            raise SystemExit(0)
+        raise ValueError(f"??????: {arg}")
+    return options
+
+
 def ensure_column(conn: sqlite3.Connection, table: str, definition: str) -> None:
     name = definition.split()[0]
     cols = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -131,7 +152,7 @@ def ensure_column(conn: sqlite3.Connection, table: str, definition: str) -> None
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
 
 
-def init_db() -> None:
+def init_db(admin_password=None) -> None:
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
     with get_conn() as conn:
@@ -228,10 +249,11 @@ def init_db() -> None:
                 (currency, rate, ts),
             )
 
+        initial_admin_password = str(admin_password or DEFAULT_ADMIN_PASSWORD)
         if not conn.execute("SELECT id FROM users LIMIT 1").fetchone():
             conn.execute(
                 "INSERT INTO users(username, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                (DEFAULT_ADMIN_USERNAME, hash_password(DEFAULT_ADMIN_PASSWORD), ts, ts),
+                (DEFAULT_ADMIN_USERNAME, hash_password(initial_admin_password), ts, ts),
             )
         migrate_inline_images(conn)
         compact_stored_dates(conn)
@@ -1306,8 +1328,9 @@ class NekoHandler(SimpleHTTPRequestHandler):
             self.send_json(500, {"error": f"下载失败: {str(e)}"})
 
 
-def run_server():
-    init_db()
+def run_server(argv=None):
+    options = parse_startup_options(argv)
+    init_db(options.get("admin_password"))
     if AUTO_BACKUP_ENABLED:
         worker = threading.Thread(target=auto_backup_worker, name="neko-auto-backup", daemon=True)
         worker.start()
@@ -1317,4 +1340,10 @@ def run_server():
     try: server.serve_forever()
     except KeyboardInterrupt: server.server_close()
 
-if __name__ == "__main__": run_server()
+if __name__ == "__main__":
+    try:
+        run_server()
+    except ValueError as exc:
+        print(f"Startup error: {exc}")
+        print("Usage: python backend/server.py [-pw <initial_password>]")
+        raise SystemExit(2)

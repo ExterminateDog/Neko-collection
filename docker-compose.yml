@@ -1,0 +1,17 @@
+services:
+  neko-collection:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: neko-collection
+    ports:
+      - "8765:8765"
+    environment:
+      NEKO_HOST: 0.0.0.0
+      NEKO_PORT: 8765
+      NEKO_ADMIN_PASSWORD: neko12345
+      NEKO_AUTO_BACKUP_ENABLED: "true"
+      NEKO_AUTO_BACKUP_TIME: "03:00"
+      NEKO_MAX_LOCAL_BACKUPS: "3"
+      NEKO_AUTO_BACKUP_POLL_SECONDS: "300"
+    restart: unless-stopped

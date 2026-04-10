@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODE="${1:-local}"
+shift || true
 
 export NEKO_PORT="${NEKO_PORT:-8765}"
 
@@ -20,4 +21,4 @@ case "$MODE" in
 esac
 
 cd "$ROOT_DIR"
-python3 ./backend/server.py
+python3 ./backend/server.py "$@"
