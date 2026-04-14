@@ -214,7 +214,8 @@ def init_db(admin_password=None) -> None:
             "image_data TEXT", "book_volumes_json TEXT",
             "sort_order INTEGER NOT NULL DEFAULT 0", "author TEXT", "publisher TEXT",
             "is_series INTEGER NOT NULL DEFAULT 1",
-            "is_private INTEGER NOT NULL DEFAULT 0"
+            "is_private INTEGER NOT NULL DEFAULT 0",
+            "manufacturer TEXT"
         ]:
             ensure_column(conn, "collections", col)
 
@@ -525,6 +526,7 @@ def normalize_item_payload(payload: dict, rates_map: dict, existing_item=None) -
         book_volumes_json = json.dumps(vols, ensure_ascii=False)
     sort_order = int(payload.get("sort_order", existing_item.get("sort_order", 0)))
     is_private = 1 if payload.get("is_private") in [True, 1, "1", "true"] else 0
+    manufacturer = str(payload.get("manufacturer", "")).strip() or None
     return {
         "name": name, "category": category, "series_name": series_name, "status": status,
         "platform": str(payload.get("platform", "")).strip() or None,
@@ -540,6 +542,7 @@ def normalize_item_payload(payload: dict, rates_map: dict, existing_item=None) -
         "author": str(payload.get("author", "")).strip() or None,
         "publisher": str(payload.get("publisher", "")).strip() or None,
         "is_series": is_series, "is_private": is_private,
+        "manufacturer": manufacturer,
     }
 
 
@@ -582,6 +585,7 @@ def row_to_item(row: sqlite3.Row) -> dict:
         "created_at": row["created_at"], "updated_at": row["updated_at"],
         "total_spent_cny": round(total, 2), "volume_count": len(vols),
         "is_series": bool(row["is_series"]), "is_private": bool(row["is_private"]),
+        "manufacturer": row["manufacturer"],
     }
 
 
@@ -909,6 +913,7 @@ class NekoHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/rates": self.handle_get_rates(); return
         if parsed.path == "/api/items": self.handle_list_items(parsed); return
         if parsed.path == "/api/stats": self.handle_stats(); return
+        if parsed.path == "/api/suggestions": self.handle_suggestions(); return
         if parsed.path == "/api/backups": self.handle_list_backups(); return
         if parsed.path == "/api/export": self.handle_export(); return
         if parsed.path == "/api/export-backup": self.handle_export_backup(); return
@@ -1028,6 +1033,39 @@ class NekoHandler(SimpleHTTPRequestHandler):
             rows = conn.execute("SELECT currency, rate_to_cny, updated_at FROM exchange_rates").fetchall()
         self.send_json(200, {"rates": [dict(r) for r in rows]})
 
+    def handle_suggestions(self):
+        if not self.require_auth(): return
+        with get_conn() as conn:
+            names = [r[0] for r in conn.execute("SELECT DISTINCT name FROM collections WHERE name IS NOT NULL").fetchall()]
+            authors = [r[0] for r in conn.execute("SELECT DISTINCT author FROM collections WHERE author IS NOT NULL").fetchall()]
+            publishers = [r[0] for r in conn.execute("SELECT DISTINCT publisher FROM collections WHERE publisher IS NOT NULL").fetchall()]
+            manufacturers = [r[0] for r in conn.execute("SELECT DISTINCT manufacturer FROM collections WHERE manufacturer IS NOT NULL").fetchall()]
+            tag_rows = [r[0] for r in conn.execute("SELECT DISTINCT tags FROM collections WHERE tags IS NOT NULL").fetchall()]
+            tags = set()
+            for tr in tag_rows:
+                for t in tr.split(","):
+                    if t.strip(): tags.add(t.strip())
+            
+            # 同时也抓取分册标题作为建议
+            vol_titles = set()
+            vol_rows = [r[0] for r in conn.execute("SELECT book_volumes_json FROM collections WHERE book_volumes_json IS NOT NULL").fetchall()]
+            for vr in vol_rows:
+                try:
+                    vols = json.loads(vr)
+                    for v in vols:
+                        if isinstance(v, dict) and v.get("volume_title"):
+                            vol_titles.add(v.get("volume_title").strip())
+                except: pass
+
+        self.send_json(200, {
+            "name": sorted(names),
+            "author": sorted(authors),
+            "publisher": sorted(publishers),
+            "manufacturer": sorted(manufacturers),
+            "tags": sorted(list(tags)),
+            "volume_title": sorted(list(vol_titles))
+        })
+
     def handle_list_backups(self):
         if not self.require_auth(): return
         try:
@@ -1122,7 +1160,7 @@ class NekoHandler(SimpleHTTPRequestHandler):
             conn.execute("DELETE FROM collections")
             for item in items:
                 norm = normalize_item_payload(item, rates)
-                conn.execute("INSERT INTO collections (name, category, series_name, status, platform, purchase_price, purchase_currency, purchase_price_cny, purchase_fx_rate_to_cny, purchase_fx_rate_timestamp, list_price_amount, list_price_currency, list_price_cny, list_fx_rate_to_cny, list_fx_rate_timestamp, book_edition_type, author, publisher, purchase_date, tags, notes, image_data, book_volumes_json, sort_order, created_at, updated_at, is_series, is_private) VALUES (:name, :category, :series_name, :status, :platform, :purchase_price, :purchase_currency, :purchase_price_cny, :purchase_fx_rate_to_cny, :purchase_fx_rate_timestamp, :list_price_amount, :list_price_currency, :list_price_cny, :list_fx_rate_to_cny, :list_fx_rate_timestamp, :book_edition_type, :author, :publisher, :purchase_date, :tags, :notes, :image_data, :book_volumes_json, :sort_order, :created_at, :updated_at, :is_series, :is_private)", {**norm, "created_at": ts, "updated_at": ts})
+                conn.execute("INSERT INTO collections (name, category, series_name, status, platform, purchase_price, purchase_currency, purchase_price_cny, purchase_fx_rate_to_cny, purchase_fx_rate_timestamp, list_price_amount, list_price_currency, list_price_cny, list_fx_rate_to_cny, list_fx_rate_timestamp, book_edition_type, author, publisher, purchase_date, tags, notes, image_data, book_volumes_json, sort_order, created_at, updated_at, is_series, is_private, manufacturer) VALUES (:name, :category, :series_name, :status, :platform, :purchase_price, :purchase_currency, :purchase_price_cny, :purchase_fx_rate_to_cny, :purchase_fx_rate_timestamp, :list_price_amount, :list_price_currency, :list_price_cny, :list_fx_rate_to_cny, :list_fx_rate_timestamp, :book_edition_type, :author, :publisher, :purchase_date, :tags, :notes, :image_data, :book_volumes_json, :sort_order, :created_at, :updated_at, :is_series, :is_private, :manufacturer)", {**norm, "created_at": ts, "updated_at": ts})
             new_rows = conn.execute("SELECT * FROM collections").fetchall()
             new_refs = set()
             for new_row in new_rows:
@@ -1166,7 +1204,7 @@ class NekoHandler(SimpleHTTPRequestHandler):
                 conn.execute("DELETE FROM collections")
                 for item in items:
                     norm = normalize_item_payload(item, rates)
-                    conn.execute("INSERT INTO collections (name, category, series_name, status, platform, purchase_price, purchase_currency, purchase_price_cny, purchase_fx_rate_to_cny, purchase_fx_rate_timestamp, list_price_amount, list_price_currency, list_price_cny, list_fx_rate_to_cny, list_fx_rate_timestamp, book_edition_type, author, publisher, purchase_date, tags, notes, image_data, book_volumes_json, sort_order, created_at, updated_at, is_series, is_private) VALUES (:name, :category, :series_name, :status, :platform, :purchase_price, :purchase_currency, :purchase_price_cny, :purchase_fx_rate_to_cny, :purchase_fx_rate_timestamp, :list_price_amount, :list_price_currency, :list_price_cny, :list_fx_rate_to_cny, :list_fx_rate_timestamp, :book_edition_type, :author, :publisher, :purchase_date, :tags, :notes, :image_data, :book_volumes_json, :sort_order, :created_at, :updated_at, :is_series, :is_private)", {**norm, "created_at": ts, "updated_at": ts})
+                    conn.execute("INSERT INTO collections (name, category, series_name, status, platform, purchase_price, purchase_currency, purchase_price_cny, purchase_fx_rate_to_cny, purchase_fx_rate_timestamp, list_price_amount, list_price_currency, list_price_cny, list_fx_rate_to_cny, list_fx_rate_timestamp, book_edition_type, author, publisher, purchase_date, tags, notes, image_data, book_volumes_json, sort_order, created_at, updated_at, is_series, is_private, manufacturer) VALUES (:name, :category, :series_name, :status, :platform, :purchase_price, :purchase_currency, :purchase_price_cny, :purchase_fx_rate_to_cny, :purchase_fx_rate_timestamp, :list_price_amount, :list_price_currency, :list_price_cny, :list_fx_rate_to_cny, :list_fx_rate_timestamp, :book_edition_type, :author, :publisher, :purchase_date, :tags, :notes, :image_data, :book_volumes_json, :sort_order, :created_at, :updated_at, :is_series, :is_private, :manufacturer)", {**norm, "created_at": ts, "updated_at": ts})
                 new_rows = conn.execute("SELECT * FROM collections").fetchall()
                 new_refs = set()
                 for new_row in new_rows:
@@ -1195,7 +1233,7 @@ class NekoHandler(SimpleHTTPRequestHandler):
                 conn.execute("DELETE FROM collections")
                 for item in items:
                     norm = normalize_item_payload(item, rates)
-                    conn.execute("INSERT INTO collections (name, category, series_name, status, platform, purchase_price, purchase_currency, purchase_price_cny, purchase_fx_rate_to_cny, purchase_fx_rate_timestamp, list_price_amount, list_price_currency, list_price_cny, list_fx_rate_to_cny, list_fx_rate_timestamp, book_edition_type, author, publisher, purchase_date, tags, notes, image_data, book_volumes_json, sort_order, created_at, updated_at, is_series, is_private) VALUES (:name, :category, :series_name, :status, :platform, :purchase_price, :purchase_currency, :purchase_price_cny, :purchase_fx_rate_to_cny, :purchase_fx_rate_timestamp, :list_price_amount, :list_price_currency, :list_price_cny, :list_fx_rate_to_cny, :list_fx_rate_timestamp, :book_edition_type, :author, :publisher, :purchase_date, :tags, :notes, :image_data, :book_volumes_json, :sort_order, :created_at, :updated_at, :is_series, :is_private)", {**norm, "created_at": ts, "updated_at": ts})
+                    conn.execute("INSERT INTO collections (name, category, series_name, status, platform, purchase_price, purchase_currency, purchase_price_cny, purchase_fx_rate_to_cny, purchase_fx_rate_timestamp, list_price_amount, list_price_currency, list_price_cny, list_fx_rate_to_cny, list_fx_rate_timestamp, book_edition_type, author, publisher, purchase_date, tags, notes, image_data, book_volumes_json, sort_order, created_at, updated_at, is_series, is_private, manufacturer) VALUES (:name, :category, :series_name, :status, :platform, :purchase_price, :purchase_currency, :purchase_price_cny, :purchase_fx_rate_to_cny, :purchase_fx_rate_timestamp, :list_price_amount, :list_price_currency, :list_price_cny, :list_fx_rate_to_cny, :list_fx_rate_timestamp, :book_edition_type, :author, :publisher, :purchase_date, :tags, :notes, :image_data, :book_volumes_json, :sort_order, :created_at, :updated_at, :is_series, :is_private, :manufacturer)", {**norm, "created_at": ts, "updated_at": ts})
                 new_rows = conn.execute("SELECT * FROM collections").fetchall()
                 new_refs = set()
                 for new_row in new_rows:
@@ -1268,7 +1306,7 @@ class NekoHandler(SimpleHTTPRequestHandler):
             with get_conn() as conn:
                 norm = normalize_item_payload(self.read_json(), get_rates_map(conn))
                 ts = now_iso()
-                cursor = conn.execute("INSERT INTO collections (name, category, series_name, status, platform, purchase_price, purchase_currency, purchase_price_cny, purchase_fx_rate_to_cny, purchase_fx_rate_timestamp, list_price_amount, list_price_currency, list_price_cny, list_fx_rate_to_cny, list_fx_rate_timestamp, book_edition_type, author, publisher, purchase_date, tags, notes, image_data, book_volumes_json, sort_order, created_at, updated_at, is_series, is_private) VALUES (:name, :category, :series_name, :status, :platform, :purchase_price, :purchase_currency, :purchase_price_cny, :purchase_fx_rate_to_cny, :purchase_fx_rate_timestamp, :list_price_amount, :list_price_currency, :list_price_cny, :list_fx_rate_to_cny, :list_fx_rate_timestamp, :book_edition_type, :author, :publisher, :purchase_date, :tags, :notes, :image_data, :book_volumes_json, :sort_order, :created_at, :updated_at, :is_series, :is_private)", {**norm, "created_at": ts, "updated_at": ts})
+                cursor = conn.execute("INSERT INTO collections (name, category, series_name, status, platform, purchase_price, purchase_currency, purchase_price_cny, purchase_fx_rate_to_cny, purchase_fx_rate_timestamp, list_price_amount, list_price_currency, list_price_cny, list_fx_rate_to_cny, list_fx_rate_timestamp, book_edition_type, author, publisher, purchase_date, tags, notes, image_data, book_volumes_json, sort_order, created_at, updated_at, is_series, is_private, manufacturer) VALUES (:name, :category, :series_name, :status, :platform, :purchase_price, :purchase_currency, :purchase_price_cny, :purchase_fx_rate_to_cny, :purchase_fx_rate_timestamp, :list_price_amount, :list_price_currency, :list_price_cny, :list_fx_rate_to_cny, :list_fx_rate_timestamp, :book_edition_type, :author, :publisher, :purchase_date, :tags, :notes, :image_data, :book_volumes_json, :sort_order, :created_at, :updated_at, :is_series, :is_private, :manufacturer)", {**norm, "created_at": ts, "updated_at": ts})
                 row = conn.execute("SELECT * FROM collections WHERE id=?", (cursor.lastrowid,)).fetchone()
             self.send_json(201, {"item": row_to_item(row)})
         except Exception as e: self.send_json(400, {"error": str(e)})
@@ -1283,7 +1321,7 @@ class NekoHandler(SimpleHTTPRequestHandler):
                 old_refs = collect_image_refs(old_item.get("image_data"), old_item.get("book_volumes"))
                 norm = normalize_item_payload(self.read_json(), get_rates_map(conn), old_item)
                 norm["id"], norm["updated_at"] = item_id, now_iso()
-                conn.execute("UPDATE collections SET name=:name, category=:category, series_name=:series_name, status=:status, platform=:platform, purchase_price=:purchase_price, purchase_currency=:purchase_currency, purchase_price_cny=:purchase_price_cny, purchase_fx_rate_to_cny=:purchase_fx_rate_to_cny, purchase_fx_rate_timestamp=:purchase_fx_rate_timestamp, list_price_amount=:list_price_amount, list_price_currency=:list_price_currency, list_price_cny=:list_price_cny, list_fx_rate_to_cny=:list_fx_rate_to_cny, list_fx_rate_timestamp=:list_fx_rate_timestamp, book_edition_type=:book_edition_type, author=:author, publisher=:publisher, purchase_date=:purchase_date, tags=:tags, notes=:notes, image_data=:image_data, book_volumes_json=:book_volumes_json, sort_order=:sort_order, updated_at=:updated_at, is_series=:is_series, is_private=:is_private WHERE id=:id", norm)
+                conn.execute("UPDATE collections SET name=:name, category=:category, series_name=:series_name, status=:status, platform=:platform, purchase_price=:purchase_price, purchase_currency=:purchase_currency, purchase_price_cny=:purchase_price_cny, purchase_fx_rate_to_cny=:purchase_fx_rate_to_cny, purchase_fx_rate_timestamp=:purchase_fx_rate_timestamp, list_price_amount=:list_price_amount, list_price_currency=:list_price_currency, list_price_cny=:list_price_cny, list_fx_rate_to_cny=:list_fx_rate_to_cny, list_fx_rate_timestamp=:list_fx_rate_timestamp, book_edition_type=:book_edition_type, author=:author, publisher=:publisher, purchase_date=:purchase_date, tags=:tags, notes=:notes, image_data=:image_data, book_volumes_json=:book_volumes_json, sort_order=:sort_order, updated_at=:updated_at, is_series=:is_series, is_private=:is_private, manufacturer=:manufacturer WHERE id=:id", norm)
                 row = conn.execute("SELECT * FROM collections WHERE id=?", (item_id,)).fetchone()
                 new_item = row_to_item(row)
                 new_refs = collect_image_refs(new_item.get("image_data"), new_item.get("book_volumes"))

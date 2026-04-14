@@ -1710,6 +1710,56 @@ body.dark-mode .private-toggle-btn.active {
 .eye-off-icon::before { left: 3px; transform: rotate(20deg); }
 .eye-off-icon::after { right: 3px; transform: rotate(-20deg); }
 
+/* 建议列表样式 */
+.suggestions-container {
+  position: relative;
+  width: 100%;
+}
+
+.suggestions-container input {
+  width: 100%;
+}
+
+.suggestions-list {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow-lg);
+  z-index: 2000;
+  margin-top: 0.5rem;
+  max-height: 200px;
+  overflow-y: auto;
+  padding: 0.5rem;
+  list-style: none;
+  animation: fade-in 0.2s ease;
+}
+
+.suggestion-item {
+  padding: 0.625rem 1rem;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.875rem;
+  color: var(--text-soft);
+  transition: all 0.2s;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.suggestion-item:hover {
+  background: var(--brand-soft);
+  color: var(--brand);
+}
+
+.suggestion-item.active {
+  background: var(--brand);
+  color: white;
+}
+
 @keyframes fade-in {
   from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: translateY(0); }

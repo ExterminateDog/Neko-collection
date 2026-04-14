@@ -127,7 +127,7 @@ function fileToDataUrl(file) {
 }
 
 function initialItemForm() {
-  return { name: "", category: "手办", status: "owned", platform: "", purchase_price: "", purchase_currency: "CNY", list_price_amount: "", list_price_currency: "CNY", book_edition_type: "普通版", author: "", publisher: "", purchase_date: "", tags: [], notes: "", image_data: null, is_series: true, is_private: false };
+  return { name: "", category: "手办", status: "owned", platform: "", purchase_price: "", purchase_currency: "CNY", list_price_amount: "", list_price_currency: "CNY", book_edition_type: "普通版", author: "", publisher: "", manufacturer: "", purchase_date: "", tags: [], notes: "", image_data: null, is_series: true, is_private: false };
 }
 function initialVolumeForm() {
   return { volume_title: "", edition_type: "普通版", purchase_status: "owned", platform: "", purchase_price: "", purchase_currency: "CNY", list_price_amount: "", list_price_currency: "CNY", purchase_date: "", notes: "", cover_image_data: null };
@@ -136,10 +136,84 @@ function itemToPayload(item) {
   const name = item.name;
   const isSeries = item.is_series ?? true;
   return {
-    name: name, category: item.category, 
-    series_name: item.category === "书籍" ? name : null, 
-    status: item.status, platform: item.platform || "", purchase_price: toNumberOrNull(item.purchase_price), purchase_currency: item.purchase_currency || "CNY", list_price_amount: toNumberOrNull(item.list_price_amount), list_price_currency: String(item.list_price_currency || "CNY").toUpperCase(), purchase_date: item.purchase_date || "", book_edition_type: item.book_edition_type || "", author: item.author || "", publisher: item.publisher || "", tags: item.tags || [], notes: item.notes || "", image_data: item.image_data || null, sort_order: item.sort_order || 0, book_volumes: item.book_volumes || [], is_series: isSeries, is_private: item.is_private || false
+    name: name, category: item.category,
+    series_name: item.category === "书籍" ? name : null,
+    status: item.status, platform: item.platform || "", purchase_price: toNumberOrNull(item.purchase_price), purchase_currency: item.purchase_currency || "CNY", list_price_amount: toNumberOrNull(item.list_price_amount), list_price_currency: String(item.list_price_currency || "CNY").toUpperCase(), purchase_date: item.purchase_date || "", book_edition_type: item.book_edition_type || "", author: item.author || "", publisher: item.publisher || "", manufacturer: item.manufacturer || "", tags: item.tags || [], notes: item.notes || "", image_data: item.image_data || null, sort_order: item.sort_order || 0, book_volumes: item.book_volumes || [], is_series: isSeries, is_private: item.is_private || false
   };
+}
+
+function AutocompleteInput({ value, onChange, suggestions = [], placeholder, className = "", ...props }) {
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [filtered, setFiltered] = useState([]);
+  const containerRef = useRef(null);
+
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (containerRef.current && !containerRef.current.contains(e.target)) {
+        setShowSuggestions(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  const handleInputChange = (e) => {
+    const val = e.target.value;
+    onChange(val);
+    if (val.trim() && suggestions.length > 0) {
+      const matches = suggestions.filter(s => 
+        s.toLowerCase().includes(val.toLowerCase()) && s.toLowerCase() !== val.toLowerCase()
+      ).slice(0, 10);
+      setFiltered(matches);
+      setShowSuggestions(matches.length > 0);
+    } else {
+      setShowSuggestions(false);
+    }
+  };
+
+  return (
+    <div className={`suggestions-container ${className}`} ref={containerRef} style={{ width: "100%" }}>
+      <input
+        {...props}
+        type="text"
+        className={className}
+        style={{ width: "100%" }}
+        value={value || ""}
+        onChange={handleInputChange}
+        onFocus={() => {
+          if (value && value.trim()) {
+            const matches = suggestions.filter(s => 
+              s.toLowerCase().includes(value.toLowerCase()) && s.toLowerCase() !== value.toLowerCase()
+            ).slice(0, 10);
+            setFiltered(matches);
+            setShowSuggestions(matches.length > 0);
+          }
+        }}
+        onBlur={() => {
+          // 延迟关闭，以便让点击建议项的 mousedown 先执行
+          setTimeout(() => setShowSuggestions(false), 200);
+        }}
+        placeholder={placeholder}
+      />
+      {showSuggestions && (
+        <ul className="suggestions-list" style={{ width: "100%" }}>
+          {filtered.map((s, i) => (
+            <li
+              key={i}
+              className="suggestion-item"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                onChange(s);
+                setShowSuggestions(false);
+              }}
+            >
+              {s}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
 }
 
 function Lightbox({ src, onClose }) {
@@ -308,6 +382,7 @@ function App() {
   const [isRestoringBackup, setIsRestoringBackup] = useState(false);
   const [isClearingData, setIsClearingData] = useState(false);
   const [isDeletingBackup, setIsDeletingBackup] = useState(false);
+  const [suggestions, setSuggestions] = useState({ name: [], author: [], publisher: [], manufacturer: [], tags: [], volume_title: [] });
 
   const [loginForm, setLoginForm] = useState({ 
     password: localStorage.getItem("neko_remembered_password") || "", 
@@ -361,6 +436,9 @@ function App() {
       setStats(statsData);
       setRates(ratesData.rates || []);
       setSelectedItem(prev => prev ? (itemsData.items || []).find(x => x.id === prev.id) || null : null);
+      
+      // 加载建议
+      apiRequest(`${API_BASE}/suggestions`).then(setSuggestions).catch(() => {});
     } catch (e) { console.error(e); }
   }, [apiRequest, isPrivateMode]);
 
@@ -1219,7 +1297,14 @@ function App() {
                 </div>
                 <div className="form-fields-col">
                   {/* 第一组: 基础信息 (独立占行) */}
-                  <label className="full">名称 / 系列名<input type="text" value={itemForm.name} onChange={e => setItemForm({ ...itemForm, name: e.target.value })} required /></label>
+                  <label className="full">名称 / 系列名
+                    <AutocompleteInput 
+                      value={itemForm.name} 
+                      onChange={val => setItemForm({ ...itemForm, name: val })} 
+                      suggestions={suggestions.name}
+                      required 
+                    />
+                  </label>
                   <div className="form-group full">
                     <span className="form-label">分类</span>
                     <OptionGroup
@@ -1309,9 +1394,32 @@ function App() {
                       {!itemForm.is_series && (
                         <label>版本类型<select value={itemForm.book_edition_type} onChange={e => setItemForm({ ...itemForm, book_edition_type: e.target.value })}><option value="">请选择</option>{BOOK_EDITION_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}</select></label>
                       )}
-                      <label>作者<input type="text" value={itemForm.author || ""} onChange={e => setItemForm({ ...itemForm, author: e.target.value })} /></label>
-                      <label>出版社<input type="text" value={itemForm.publisher || ""} onChange={e => setItemForm({ ...itemForm, publisher: e.target.value })} /></label>
+                      <label>作者
+                        <AutocompleteInput 
+                          value={itemForm.author || ""} 
+                          onChange={val => setItemForm({ ...itemForm, author: val })} 
+                          suggestions={suggestions.author}
+                        />
+                      </label>
+                      <label>出版社
+                        <AutocompleteInput 
+                          value={itemForm.publisher || ""} 
+                          onChange={val => setItemForm({ ...itemForm, publisher: val })} 
+                          suggestions={suggestions.publisher}
+                        />
+                      </label>
                     </>
+                  )}
+
+                  {(itemForm.category === "手办" || itemForm.category === "周边") && (
+                    <label className="full">厂商
+                      <AutocompleteInput 
+                        value={itemForm.manufacturer || ""} 
+                        onChange={val => setItemForm({ ...itemForm, manufacturer: val })} 
+                        suggestions={suggestions.manufacturer}
+                        placeholder="输入厂商名称..." 
+                      />
+                    </label>
                   )}
 
                   {/* 日期与标签并列 */}
@@ -1332,12 +1440,12 @@ function App() {
                       {(itemForm.tags || []).map((t, i) => (
                         <span key={i} className="tag-capsule">{t}<span className="tag-remove" onClick={() => setItemForm({ ...itemForm, tags: itemForm.tags.filter((_, idx) => idx !== i) })}>×</span></span>
                       ))}
-                      <input
-                        type="text"
+                      <AutocompleteInput
                         className="tag-inner-input"
                         style={{ border: "none", background: "transparent", flex: 1, minWidth: "120px", outline: "none", padding: "0.25rem" }}
                         value={tagInputValue}
-                        onChange={e => setTagInputValue(e.target.value)}
+                        onChange={setTagInputValue}
+                        suggestions={suggestions.tags}
                         onKeyDown={e => {
                           if (e.key === "Enter") {
                             e.preventDefault();
@@ -1387,6 +1495,7 @@ function App() {
                 )}
                 <div className="detail-meta">
                   <div className="detail-line"><strong>分类</strong> {selectedItem.category}</div>
+                  {selectedItem.manufacturer && <div className="detail-line"><strong>厂商</strong> {selectedItem.manufacturer}</div>}
                   {!(selectedItem.category === "书籍" && selectedItem.is_series) && (
                     <>
                       <div className="detail-line"><strong>商品定价</strong> {fmtOriginalPrice(selectedItem.list_price_amount, selectedItem.list_price_currency, selectedItem.list_price_cny)}</div>
@@ -1522,7 +1631,14 @@ function App() {
                   {volumeForm.cover_image_data && <button type="button" className="btn danger small" onClick={() => setVolumeForm({ ...volumeForm, cover_image_data: null })} style={{ width: "100%", marginTop: "0.5rem" }}>移除图片</button>}
                 </div>
                 <div className="form-fields-col">
-                  <label className="full">分册名<input type="text" value={volumeForm.volume_title} onChange={e => setVolumeForm({ ...volumeForm, volume_title: e.target.value })} required /></label>
+                  <label className="full">分册名
+                    <AutocompleteInput 
+                      value={volumeForm.volume_title} 
+                      onChange={val => setVolumeForm({ ...volumeForm, volume_title: val })} 
+                      suggestions={suggestions.volume_title}
+                      required 
+                    />
+                  </label>
                   <label className="full">版本类型<select value={volumeForm.edition_type} onChange={e => setVolumeForm({ ...volumeForm, edition_type: e.target.value })}>{BOOK_EDITION_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}</select></label>
                   <div className="form-group full">
                     <span className="form-label">购买状态</span>
