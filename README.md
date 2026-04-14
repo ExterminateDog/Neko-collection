@@ -38,43 +38,71 @@
 
 ## 🚀 快速开始
 
-### 1. 环境准备
+### 本地运行 (Node.js + Python)
+
+#### 1. 环境准备
 确保你的系统中已安装 **Python 3.x** 和 **Node.js**。
 
-### 2. 安装依赖
+#### 2. 安装依赖
 在项目根目录下运行：
 ```bash
 npm install
 ```
 
-### 3. 构建前端
+#### 3. 构建前端
 使用 esbuild 打包 React 代码：
 ```bash
 npm run build
 ```
 
-### 4. 运行系统
+#### 4. 运行系统
 你可以通过脚本快速启动：
 
 - **Windows**:
   ```cmd
   .\run-windows.cmd [local|lan]
   ```
-  - `local`: 访问地址 [http://127.0.0.1:8765](http://127.0.0.1:8765)
-  - `lan`: 允许同一网络下的其他设备访问 (默认)。
-
 - **Linux / macOS**:
   ```bash
   chmod +x run-linux.sh
   ./run-linux.sh [local|lan]
   ```
-  - `local`: 访问地址 [http://127.0.0.1:8765](http://127.0.0.1:8765) (默认)
-  - `lan`: 允许同一网络下的其他设备访问。
 
-**手动启动后端:**
+---
+
+## 🐳 Docker 部署
+
+推荐使用 Docker Compose 进行快速部署，无需手动安装 Node.js 或 Python 环境。
+
+### 1. 快速启动
+在项目根目录下执行：
 ```bash
-python ./backend/server.py
+docker-compose up -d
 ```
+启动后访问：[http://localhost:8765](http://localhost:8765)
+
+### 2. 数据持久化 (推荐)
+为了确保数据库和上传的图片在容器更新时不丢失，建议在 `docker-compose.yml` 中配置挂载卷：
+```yaml
+services:
+  neko-collection:
+    # ... 其他配置
+    volumes:
+      - ./backend/neko_collection.db:/app/backend/neko_collection.db
+      - ./frontend/uploads:/app/frontend/uploads
+      - ./backend/backups:/app/backend/backups
+```
+
+### 3. 环境变量配置
+你可以在 `docker-compose.yml` 的 `environment` 节点下调整以下参数：
+
+| 变量名 | 说明 | 默认值 |
+| :--- | :--- | :--- |
+| `NEKO_ADMIN_PASSWORD` | 管理员登录密码 | `neko12345` |
+| `NEKO_PORT` | 容器内服务端口 | `8765` |
+| `NEKO_AUTO_BACKUP_ENABLED` | 是否启用自动备份 | `true` |
+| `NEKO_AUTO_BACKUP_TIME` | 每日自动备份时间 (HH:mm) | `03:00` |
+| `NEKO_MAX_LOCAL_BACKUPS` | 本地保留的最大备份数量 | `3` |
 
 ---
 
@@ -108,30 +136,3 @@ E:\CodeX\Neko-collection\
 ## 📝 许可证
 
 本项目采用 [MIT License](LICENSE) 许可。
-
-
-
-## ???????
-
-?????????? `-pw` ??????????
-
-```bash
-python ./backend/server.py -pw your_password
-```
-
-Windows ???????
-
-```bat
-run-windows.cmd local -pw your_password
-```
-
-Linux ???????
-
-```bash
-./run-linux.sh local -pw your_password
-```
-
-???
-
-- `-pw` ???????????????
-- ?????????????????????????
