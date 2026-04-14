@@ -276,6 +276,7 @@ function App() {
   const [categoryFilter, setCategoryFilter] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [showLogin, setShowLogin] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
   const [showStats, setShowStats] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showItem, setShowItem] = useState(false);
@@ -307,10 +308,12 @@ function App() {
   const [isRestoringBackup, setIsRestoringBackup] = useState(false);
   const [isClearingData, setIsClearingData] = useState(false);
   const [isDeletingBackup, setIsDeletingBackup] = useState(false);
-  
-  const [loginForm, setLoginForm] = useState({ password: "" });
-  const [itemForm, setItemForm] = useState(initialItemForm());
-  const [editingItemId, setEditingItemId] = useState(null);
+
+  const [loginForm, setLoginForm] = useState({ 
+    password: localStorage.getItem("neko_remembered_password") || "", 
+    remember: !!localStorage.getItem("neko_remembered_password") 
+  });
+  const [itemForm, setItemForm] = useState(initialItemForm());  const [editingItemId, setEditingItemId] = useState(null);
   const [bookVolumesDraft, setBookVolumesDraft] = useState([]);
   const [selectedItem, setSelectedItem] = useState(null);
   const [selectedVolume, setSelectedVolume] = useState(null);
@@ -1144,9 +1147,54 @@ function App() {
         <div className="modal" onMouseDown={e => e.target === e.currentTarget && setShowLogin(false)}>
           <div className="modal-card small" onMouseDown={e => e.stopPropagation()}>
             <div className="modal-head"><h3>登录</h3><button className="icon-btn" onClick={() => setShowLogin(false)}>×</button></div>
-            <form className="form-grid one-col" onSubmit={async e => { e.preventDefault(); try { const d = await apiRequest(`${API_BASE}/login`, { method: "POST", body: JSON.stringify(loginForm) }); setToken(d.token); setUser(d.user); localStorage.setItem("neko_token", d.token); setShowLogin(false); setLoginForm({ password: "" }); } catch (e) { notify(e.message, "错误", "error"); } }}>
-              <label>密码<input type="password" value={loginForm.password} onChange={e => setLoginForm({ password: e.target.value })} required /></label>
-              <div className="form-actions"><button type="submit" className="btn primary">登录</button></div>
+            <form className="form-grid one-col" onSubmit={async e => { 
+              e.preventDefault(); 
+              try { 
+                const d = await apiRequest(`${API_BASE}/login`, { method: "POST", body: JSON.stringify({ password: loginForm.password }) }); 
+                setToken(d.token); 
+                setUser(d.user); 
+                localStorage.setItem("neko_token", d.token); 
+                if (loginForm.remember) {
+                  localStorage.setItem("neko_remembered_password", loginForm.password);
+                } else {
+                  localStorage.removeItem("neko_remembered_password");
+                }
+                setShowLogin(false); 
+                setShowPassword(false);
+                if (!loginForm.remember) setLoginForm({ ...loginForm, password: "" }); 
+              } catch (e) { 
+                notify(e.message, "错误", "error"); 
+              } 
+            }}>
+              <label style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                <span style={{ fontWeight: 700, fontSize: "0.95rem" }}>密码</span>
+                <div className="password-input-wrap">
+                  <input 
+                    type={showPassword ? "text" : "password"} 
+                    value={loginForm.password} 
+                    onChange={e => setLoginForm({ ...loginForm, password: e.target.value })} 
+                    required 
+                    placeholder="请输入管理员密码"
+                  />
+                  <button 
+                    type="button" 
+                    className="password-toggle-btn"
+                    onClick={() => setShowPassword(!showPassword)}
+                    tabIndex="-1"
+                  >
+                    {showPassword ? <div className="eye-icon"></div> : <div className="eye-off-icon"></div>}
+                  </button>
+                </div>
+              </label>
+              <div style={{ marginTop: "0.5rem", width: "100%", display: "flex", justifyContent: "flex-start" }}>
+                <label className="checkbox-group" style={{ margin: 0 }}>
+                  <input type="checkbox" checked={loginForm.remember} onChange={e => setLoginForm({ ...loginForm, remember: e.target.checked })} />
+                  <span>记住密码</span>
+                </label>
+              </div>
+              <div className="form-actions" style={{ marginTop: "1.5rem", width: "100%" }}>
+                <button type="submit" className="btn primary" style={{ width: "100%", height: "3.25rem", fontSize: "1.1rem", borderRadius: "14px" }}>登录</button>
+              </div>
             </form>
           </div>
         </div>
