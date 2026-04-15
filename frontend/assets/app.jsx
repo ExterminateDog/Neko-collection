@@ -132,6 +132,9 @@ function initialItemForm() {
 function initialVolumeForm() {
   return { volume_title: "", edition_type: "普通版", purchase_status: "owned", platform: "", purchase_price: "", purchase_currency: "CNY", list_price_amount: "", list_price_currency: "CNY", purchase_date: "", notes: "", cover_image_data: null };
 }
+function initialProxyForm() {
+  return { enabled: false, http_proxy: "", https_proxy: "", no_proxy: "127.0.0.1,localhost" };
+}
 function itemToPayload(item) {
   const name = item.name;
   const isSeries = item.is_series ?? true;
@@ -382,7 +385,11 @@ function App() {
   const [isRestoringBackup, setIsRestoringBackup] = useState(false);
   const [isClearingData, setIsClearingData] = useState(false);
   const [isDeletingBackup, setIsDeletingBackup] = useState(false);
+  const [isLoadingSettings, setIsLoadingSettings] = useState(false);
+  const [isSavingProxy, setIsSavingProxy] = useState(false);
+  const [isTestingProxy, setIsTestingProxy] = useState(false);
   const [suggestions, setSuggestions] = useState({ name: [], author: [], publisher: [], manufacturer: [], tags: [], volume_title: [] });
+  const [proxyForm, setProxyForm] = useState(initialProxyForm());
 
   const [loginForm, setLoginForm] = useState({ 
     password: localStorage.getItem("neko_remembered_password") || "", 
@@ -458,6 +465,22 @@ function App() {
     }
   }, [apiRequest, loggedIn]);
 
+  const loadSettings = useCallback(async () => {
+    if (!loggedIn) {
+      setProxyForm(initialProxyForm());
+      return;
+    }
+    try {
+      setIsLoadingSettings(true);
+      const data = await apiRequest(`${API_BASE}/settings`);
+      setProxyForm({ ...initialProxyForm(), ...(data.proxy || {}) });
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsLoadingSettings(false);
+    }
+  }, [apiRequest, loggedIn]);
+
   useEffect(() => {
     if (token && !user) {
       apiRequest(`${API_BASE}/me`).then(d => { if (d.logged_in) setUser(d.user); }).catch(() => {});
@@ -468,8 +491,9 @@ function App() {
   useEffect(() => {
     if (showSettings && loggedIn) {
       refreshBackupFiles();
+      loadSettings();
     }
-  }, [showSettings, loggedIn, refreshBackupFiles]);
+  }, [showSettings, loggedIn, refreshBackupFiles, loadSettings]);
 
   const handleDownloadImage = async (url, type) => {
     if (!url) return;
@@ -484,6 +508,31 @@ function App() {
       }
     } catch (e) {
       notify(e.message, "错误", "error");
+    }
+  };
+
+  const handleSaveProxySettings = async () => {
+    try {
+      setIsSavingProxy(true);
+      const data = await apiRequest(`${API_BASE}/settings/proxy`, { method: "POST", body: JSON.stringify(proxyForm) });
+      setProxyForm({ ...initialProxyForm(), ...(data.proxy || {}) });
+      notify(data.message || "代理设置已保存", "成功", "success");
+    } catch (e) {
+      notify(e.message, "错误", "error");
+    } finally {
+      setIsSavingProxy(false);
+    }
+  };
+
+  const handleTestProxySettings = async () => {
+    try {
+      setIsTestingProxy(true);
+      const data = await apiRequest(`${API_BASE}/settings/proxy/test`, { method: "POST", body: JSON.stringify(proxyForm) });
+      notify(data.message || "代理连接测试成功", "成功", "success");
+    } catch (e) {
+      notify(e.message, "错误", "error");
+    } finally {
+      setIsTestingProxy(false);
     }
   };
 
@@ -987,7 +1036,7 @@ function App() {
 
       {showSettings && (
         <div className="modal" onMouseDown={e => e.target === e.currentTarget && setShowSettings(false)}>
-          <div className="modal-card small" onMouseDown={e => e.stopPropagation()}>
+          <div className="modal-card small" style={{ maxWidth: "720px" }} onMouseDown={e => e.stopPropagation()}>
             <div className="modal-head"><h3>系统设置</h3><button className="icon-btn" onClick={() => setShowSettings(false)}>×</button></div>
             <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
               <section>
@@ -1046,6 +1095,76 @@ function App() {
                     })}
                   </div>
                   <p style={{ fontSize: "0.7rem", color: "var(--muted)", marginTop: "1rem", textAlign: "center" }}>数据来源: ExchangeRate-API (实时汇率仅供参考)</p>
+                </div>
+              </section>
+              <section>
+                <h4>网络代理</h4>
+                <div style={{ background: "var(--surface-2)", padding: "1.25rem", borderRadius: "16px", border: "1px solid var(--line)", marginTop: "0.75rem", display: "flex", flexDirection: "column", gap: "1rem" }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "1rem", flexWrap: "wrap" }}>
+                    <div>
+                      <div style={{ fontWeight: 700, color: "var(--text)" }}>启用代理</div>
+                      <div style={{ fontSize: "0.78rem", color: "var(--muted)", marginTop: "0.2rem" }}>用于图片链接下载与汇率同步</div>
+                    </div>
+                    <button
+                      className={`toggle-btn ${proxyForm.enabled ? "active" : ""}`}
+                      onClick={() => setProxyForm(prev => ({ ...prev, enabled: !prev.enabled }))}
+                      disabled={isLoadingSettings || isSavingProxy || isTestingProxy}
+                    >
+                      {proxyForm.enabled ? "已开启" : "已关闭"}
+                    </button>
+                  </div>
+
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: "0.75rem" }}>
+                    <label style={{ display: "flex", flexDirection: "column", gap: "0.35rem", fontSize: "0.85rem", color: "var(--text-soft)" }}>
+                      HTTP 代理
+                      <input
+                        type="text"
+                        value={proxyForm.http_proxy}
+                        onChange={e => setProxyForm(prev => ({ ...prev, http_proxy: e.target.value }))}
+                        placeholder="http://192.168.1.8:7890"
+                        disabled={isLoadingSettings || isSavingProxy}
+                        style={{ padding: "0.65rem 0.8rem", borderRadius: "10px", border: "1px solid var(--line)", background: "var(--surface)", color: "var(--text)" }}
+                      />
+                    </label>
+                    <label style={{ display: "flex", flexDirection: "column", gap: "0.35rem", fontSize: "0.85rem", color: "var(--text-soft)" }}>
+                      HTTPS 代理
+                      <input
+                        type="text"
+                        value={proxyForm.https_proxy}
+                        onChange={e => setProxyForm(prev => ({ ...prev, https_proxy: e.target.value }))}
+                        placeholder="留空则复用 HTTP 代理"
+                        disabled={isLoadingSettings || isSavingProxy}
+                        style={{ padding: "0.65rem 0.8rem", borderRadius: "10px", border: "1px solid var(--line)", background: "var(--surface)", color: "var(--text)" }}
+                      />
+                    </label>
+                  </div>
+
+                  <label style={{ display: "flex", flexDirection: "column", gap: "0.35rem", fontSize: "0.85rem", color: "var(--text-soft)" }}>
+                    绕过地址 (NO_PROXY)
+                    <input
+                      type="text"
+                      value={proxyForm.no_proxy}
+                      onChange={e => setProxyForm(prev => ({ ...prev, no_proxy: e.target.value }))}
+                      placeholder="127.0.0.1,localhost"
+                      disabled={isLoadingSettings || isSavingProxy}
+                      style={{ padding: "0.65rem 0.8rem", borderRadius: "10px", border: "1px solid var(--line)", background: "var(--surface)", color: "var(--text)" }}
+                    />
+                  </label>
+
+                  <div style={{ padding: "0.9rem 1rem", borderRadius: "14px", background: "rgba(74,209,255,0.12)", border: "1px solid rgba(74,209,255,0.28)", color: "var(--text-soft)", lineHeight: 1.65, fontSize: "0.82rem" }}>
+                    使用电脑上的 Clash 时，请先在 Clash 开启“允许局域网连接”，然后填写你电脑的局域网 IP 和 HTTP 代理端口，例如 `http://192.168.1.8:7890`。
+                    <br />
+                    在 NAS 的 Docker 容器里不要填写 `127.0.0.1`，因为那会指向容器自己，而不是你的电脑。
+                  </div>
+
+                  <div className="form-actions" style={{ marginTop: 0 }}>
+                    <button type="button" className="btn ghost" onClick={handleTestProxySettings} disabled={isLoadingSettings || isSavingProxy || isTestingProxy}>
+                      {isTestingProxy ? "测试中..." : "测试代理"}
+                    </button>
+                    <button type="button" className="btn primary" onClick={handleSaveProxySettings} disabled={isLoadingSettings || isSavingProxy}>
+                      {isSavingProxy ? "保存中..." : "保存代理设置"}
+                    </button>
+                  </div>
                 </div>
               </section>
             </div>

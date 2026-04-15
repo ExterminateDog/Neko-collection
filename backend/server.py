@@ -15,7 +15,7 @@ from datetime import date, datetime, timedelta, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener, urlopen
 
 HOST = os.environ.get("NEKO_HOST", "127.0.0.1")
 PORT = int(os.environ.get("NEKO_PORT", "8765"))
@@ -40,6 +40,13 @@ DEFAULT_RATES = {"CNY": 1.0, "JPY": 0.048, "TWD": 0.225, "HKD": 0.92}
 ALLOWED_CURRENCIES = set(DEFAULT_RATES.keys())
 BOOK_EDITIONS = {"首刷限定版", "首刷版", "特装版", "普通版"}
 ALLOWED_STATUSES = {"owned", "preorder", "wishlist"}
+PROXY_CONFIG_KEY = "proxy_config"
+DEFAULT_PROXY_SETTINGS = {
+    "enabled": False,
+    "http_proxy": "",
+    "https_proxy": "",
+    "no_proxy": "127.0.0.1,localhost",
+}
 IMAGE_EXTENSION_MAP = {
     "image/jpeg": ".jpg",
     "image/jpg": ".jpg",
@@ -152,6 +159,97 @@ def ensure_column(conn: sqlite3.Connection, table: str, definition: str) -> None
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
 
 
+def parse_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def load_json_setting(conn: sqlite3.Connection, key: str, default):
+    row = conn.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+    if not row or row["value"] in (None, ""):
+        return default
+    try:
+        return json.loads(row["value"])
+    except json.JSONDecodeError:
+        return default
+
+
+def save_json_setting(conn: sqlite3.Connection, key: str, payload) -> None:
+    conn.execute(
+        """
+        INSERT INTO app_settings(key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+            value=excluded.value,
+            updated_at=excluded.updated_at
+        """,
+        (key, json.dumps(payload, ensure_ascii=False), now_iso()),
+    )
+
+
+def validate_proxy_url(value: str, field_name: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    parsed = urlparse(text)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError(f"{field_name} 必须是有效的 http/https 代理地址")
+    return text
+
+
+def normalize_proxy_settings(payload) -> dict:
+    payload = payload if isinstance(payload, dict) else {}
+    settings = {
+        "enabled": parse_bool(payload.get("enabled", False)),
+        "http_proxy": validate_proxy_url(payload.get("http_proxy", ""), "HTTP 代理"),
+        "https_proxy": validate_proxy_url(payload.get("https_proxy", ""), "HTTPS 代理"),
+        "no_proxy": str(payload.get("no_proxy", DEFAULT_PROXY_SETTINGS["no_proxy"])).strip(),
+    }
+    if settings["enabled"] and not (settings["http_proxy"] or settings["https_proxy"]):
+        raise ValueError("启用代理时至少需要填写一个代理地址")
+    return settings
+
+
+def get_proxy_settings(conn: sqlite3.Connection) -> dict:
+    raw = load_json_setting(conn, PROXY_CONFIG_KEY, DEFAULT_PROXY_SETTINGS)
+    merged = dict(DEFAULT_PROXY_SETTINGS)
+    if isinstance(raw, dict):
+        merged.update(raw)
+    return normalize_proxy_settings(merged)
+
+
+def proxy_bypass_for_url(url: str, no_proxy_text: str) -> bool:
+    hostname = (urlparse(str(url or "")).hostname or "").lower().strip()
+    if not hostname:
+        return False
+    for part in str(no_proxy_text or "").split(","):
+        pattern = part.strip().lower()
+        if not pattern:
+            continue
+        if hostname == pattern or hostname.endswith(f".{pattern}"):
+            return True
+    return False
+
+
+def open_remote_url(target, timeout=15, proxy_settings=None):
+    url = getattr(target, "full_url", None) or str(target or "")
+    if proxy_settings and proxy_settings.get("enabled"):
+        if proxy_bypass_for_url(url, proxy_settings.get("no_proxy", "")):
+            opener = build_opener(ProxyHandler({}))
+            return opener.open(target, timeout=timeout)
+        proxies = {}
+        if proxy_settings.get("http_proxy"):
+            proxies["http"] = proxy_settings["http_proxy"]
+        if proxy_settings.get("https_proxy"):
+            proxies["https"] = proxy_settings["https_proxy"]
+        elif proxy_settings.get("http_proxy"):
+            proxies["https"] = proxy_settings["http_proxy"]
+        opener = build_opener(ProxyHandler(proxies))
+        return opener.open(target, timeout=timeout)
+    return urlopen(target, timeout=timeout)
+
+
 def init_db(admin_password=None) -> None:
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
@@ -231,6 +329,15 @@ def init_db(admin_password=None) -> None:
             """
         )
         ensure_column(conn, "users", "updated_at TEXT")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS sessions (
@@ -911,6 +1018,7 @@ class NekoHandler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/me": self.handle_me(); return
         if parsed.path == "/api/rates": self.handle_get_rates(); return
+        if parsed.path == "/api/settings": self.handle_get_settings(); return
         if parsed.path == "/api/items": self.handle_list_items(parsed); return
         if parsed.path == "/api/stats": self.handle_stats(); return
         if parsed.path == "/api/suggestions": self.handle_suggestions(); return
@@ -935,6 +1043,8 @@ class NekoHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/preview-backup": self.handle_preview_backup(); return
         if parsed.path == "/api/restore-local-backup": self.handle_restore_local_backup(); return
         if parsed.path == "/api/import-backup": self.handle_import_backup(); return
+        if parsed.path == "/api/settings/proxy": self.handle_update_proxy_settings(); return
+        if parsed.path == "/api/settings/proxy/test": self.handle_test_proxy_settings(); return
         if parsed.path == "/api/change-password": self.handle_change_password(); return
         if parsed.path == "/api/rates/update": self.handle_update_rates(); return
         if parsed.path == "/api/download-image": self.handle_download_image(); return
@@ -1027,6 +1137,12 @@ class NekoHandler(SimpleHTTPRequestHandler):
         user = self.get_auth_user(send_error=False)
         if not user: self.send_json(200, {"logged_in": False}); return
         self.send_json(200, {"logged_in": True, "user": user})
+
+    def handle_get_settings(self):
+        if not self.require_auth(): return
+        with get_conn() as conn:
+            proxy_settings = get_proxy_settings(conn)
+        self.send_json(200, {"proxy": proxy_settings})
 
     def handle_get_rates(self):
         with get_conn() as conn:
@@ -1285,11 +1401,38 @@ class NekoHandler(SimpleHTTPRequestHandler):
             conn.execute("UPDATE users SET password_hash=?, updated_at=? WHERE id=?", (hash_password(pwd), now_iso(), user["user_id"]))
         self.send_json(200, {"message": "修改成功"})
 
+    def handle_update_proxy_settings(self):
+        if not self.require_auth(): return
+        try:
+            settings = normalize_proxy_settings(self.read_json())
+            with get_conn() as conn:
+                save_json_setting(conn, PROXY_CONFIG_KEY, settings)
+            self.send_json(200, {"message": "代理设置已保存", "proxy": settings})
+        except Exception as e:
+            self.send_json(400, {"error": str(e)})
+
+    def handle_test_proxy_settings(self):
+        if not self.require_auth(): return
+        try:
+            payload = self.read_json()
+            settings = normalize_proxy_settings(payload)
+            if not settings.get("enabled"):
+                self.send_json(400, {"error": "请先启用代理后再测试"})
+                return
+            test_url = str(payload.get("test_url", "")).strip() or "https://www.gstatic.com/generate_204"
+            request = Request(test_url, headers={"User-Agent": "Mozilla/5.0"})
+            with open_remote_url(request, timeout=12, proxy_settings=settings) as resp:
+                status = getattr(resp, "status", 200)
+            self.send_json(200, {"message": f"代理连接测试成功 ({status})", "test_url": test_url})
+        except Exception as e:
+            self.send_json(400, {"error": f"代理测试失败: {e}"})
+
     def handle_update_rates(self):
         if not self.require_auth(): return
-        import urllib.request
         try:
-            with urllib.request.urlopen("https://api.exchangerate-api.com/v4/latest/CNY", timeout=10) as resp:
+            with get_conn() as conn:
+                proxy_settings = get_proxy_settings(conn)
+            with open_remote_url("https://api.exchangerate-api.com/v4/latest/CNY", timeout=10, proxy_settings=proxy_settings) as resp:
                 data = json.loads(resp.read())["rates"]
                 ts = now_iso()
                 with get_conn() as conn:
@@ -1350,8 +1493,10 @@ class NekoHandler(SimpleHTTPRequestHandler):
             return
         
         try:
+            with get_conn() as conn:
+                proxy_settings = get_proxy_settings(conn)
             req = Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urlopen(req, timeout=15) as resp:
+            with open_remote_url(req, timeout=15, proxy_settings=proxy_settings) as resp:
                 content_type = resp.headers.get("Content-Type", "")
                 if not content_type.startswith("image/"):
                     self.send_json(400, {"error": "链接不是有效的图片"})
