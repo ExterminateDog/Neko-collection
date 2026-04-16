@@ -10,6 +10,14 @@ const DEFAULT_CATEGORIES = ["手办", "书籍", "周边", "其他"];
 const PRICE_CURRENCY_OPTIONS = ["CNY", "JPY", "TWD", "HKD"];
 const CURRENCY_LABELS = { CNY: "人民币 (CNY)", JPY: "日元 (JPY)", TWD: "新台币 (TWD)", HKD: "港币 (HKD)" };
 const CURRENCY_SYMBOLS = { CNY: "￥", JPY: "¥", TWD: "NT$", HKD: "$" };
+const ITEM_NAME_COLLATOR = new Intl.Collator(["zh-Hans-CN-u-co-pinyin", "en"], { numeric: true, sensitivity: "base" });
+const PINYIN_INITIAL_COLLATOR = new Intl.Collator("zh-Hans-CN-u-co-pinyin", { sensitivity: "base" });
+const PINYIN_INITIAL_BOUNDARIES = [
+  ["a", "阿"], ["b", "芭"], ["c", "擦"], ["d", "搭"], ["e", "蛾"], ["f", "发"],
+  ["g", "噶"], ["h", "哈"], ["j", "击"], ["k", "喀"], ["l", "垃"], ["m", "妈"],
+  ["n", "拿"], ["o", "哦"], ["p", "啪"], ["q", "期"], ["r", "然"], ["s", "撒"],
+  ["t", "塌"], ["w", "挖"], ["x", "昔"], ["y", "压"], ["z", "匝"]
+];
 const PLATFORM_ICONS = {
   淘宝: <img src="assets/Taobao.png" className="platform-icon" alt="Taobao" />,
   京东: <img src="assets/JD.ico" className="platform-icon" alt="JD" />,
@@ -124,6 +132,25 @@ function fileToDataUrl(file) {
     reader.onerror = () => reject(new Error("图片读取失败"));
     reader.readAsDataURL(file);
   });
+}
+
+function getChinesePinyinInitial(char) {
+  if (!/[\u3400-\u9fff]/.test(char)) return "";
+  for (let i = PINYIN_INITIAL_BOUNDARIES.length - 1; i >= 0; i--) {
+    if (PINYIN_INITIAL_COLLATOR.compare(char, PINYIN_INITIAL_BOUNDARIES[i][1]) >= 0) {
+      return PINYIN_INITIAL_BOUNDARIES[i][0];
+    }
+  }
+  return "a";
+}
+
+function getItemSortInitial(label) {
+  const text = String(label || "").trim();
+  if (!text) return "~";
+  const firstChar = text[0];
+  if (/[a-z0-9]/i.test(firstChar)) return firstChar.toLowerCase();
+  if (/[\u3400-\u9fff]/.test(firstChar)) return getChinesePinyinInitial(firstChar);
+  return "~";
 }
 
 function initialItemForm() {
@@ -346,11 +373,12 @@ function App() {
   const [rates, setRates] = useState([]);
   const [selectedYear, setSelectedYear] = useState("all");
   const [viewMode, setViewMode] = useState(localStorage.getItem("neko_view_mode") || "grid");
+  const [sortDirection, setSortDirection] = useState(localStorage.getItem("neko_sort_direction") || "asc");
   const [pieTooltip, setPieTooltip] = useState(null);
   const [isDarkMode, setIsDarkMode] = useState(localStorage.getItem("neko_theme") === "dark");
   const [isPrivateMode, setIsPrivateMode] = useState(localStorage.getItem("neko_private_mode") === "true");
-  const [statusFilter, setStatusFilter] = useState("");
-  const [categoryFilter, setCategoryFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState([]);
+  const [categoryFilter, setCategoryFilter] = useState([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [showLogin, setShowLogin] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
@@ -405,7 +433,7 @@ function App() {
   const [newPassword, setNewPassword] = useState("");
   const [imageUrlInput, setImageUrlInput] = useState("");
   const [volumeImageUrlInput, setVolumeImageUrlInput] = useState("");
-  const [colWidths, setColWidths] = useState([48, 200, 100, 100, 120, 100, 120, 100, 80]);
+  const [colWidths, setColWidths] = useState([56, 210, 116, 92, 104, 92, 104, 88, 148]);
 
   
   const pieCanvasRef = useRef(null);
@@ -612,12 +640,21 @@ function App() {
   const filteredItems = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return items.filter(item => {
-      if (statusFilter && item.status !== statusFilter) return false;
-      if (categoryFilter && item.category !== categoryFilter) return false;
+      if (statusFilter.length && !statusFilter.includes(item.status)) return false;
+      if (categoryFilter.length && !categoryFilter.includes(item.category)) return false;
       if (!q) return true;
       return [item.name, item.series_name, item.category, item.platform, ...(item.tags || [])].filter(Boolean).join(" ").toLowerCase().includes(q);
+    }).sort((a, b) => {
+      const aLabel = String(a.series_name || a.name || "").trim();
+      const bLabel = String(b.series_name || b.name || "").trim();
+      const byInitial = ITEM_NAME_COLLATOR.compare(getItemSortInitial(aLabel), getItemSortInitial(bLabel));
+      if (byInitial !== 0) return sortDirection === "desc" ? -byInitial : byInitial;
+      const byName = ITEM_NAME_COLLATOR.compare(aLabel, bLabel);
+      if (byName !== 0) return sortDirection === "desc" ? -byName : byName;
+      const byId = Number(a.id || 0) - Number(b.id || 0);
+      return sortDirection === "desc" ? -byId : byId;
     });
-  }, [items, statusFilter, categoryFilter, searchQuery]);
+  }, [items, statusFilter, categoryFilter, searchQuery, sortDirection]);
 
   const summary = useMemo(() => {
     const ownedOrPreorder = filteredItems.filter(x => x.status === "owned" || x.status === "preorder");
@@ -830,9 +867,35 @@ function App() {
     document.addEventListener("mouseup", onMouseUp);
   };
 
+  const updateSelectedItemVolumes = async (volumes) => {
+    if (!selectedItem) return;
+    await apiRequest(`${API_BASE}/items/${selectedItem.id}`, {
+      method: "PUT",
+      body: JSON.stringify(itemToPayload({ ...selectedItem, book_volumes: volumes }))
+    });
+    await refreshAll();
+  };
+
+  const moveSelectedVolume = async (index, offset) => {
+    if (!selectedItem?.book_volumes?.length) return;
+    const targetIndex = index + offset;
+    if (targetIndex < 0 || targetIndex >= selectedItem.book_volumes.length) return;
+    const nextVolumes = [...selectedItem.book_volumes];
+    const [moved] = nextVolumes.splice(index, 1);
+    nextVolumes.splice(targetIndex, 0, moved);
+    try {
+      await updateSelectedItemVolumes(nextVolumes);
+    } catch (e) {
+      notify(e.message, "错误", "error");
+    }
+  };
+
   const gridTemplate = colWidths.map(w => `${w}px`).join(' ');
 
   const triggerLightbox = (src) => { if (src) { setLightboxSrc(src); setShowLightbox(true); } };
+  const toggleFilterValue = (currentValues, nextValue, setter) => {
+    setter(currentValues.includes(nextValue) ? currentValues.filter(value => value !== nextValue) : [...currentValues, nextValue]);
+  };
 
   return (
     <>
@@ -859,11 +922,22 @@ function App() {
             </div>
             <div className="filter-row">
               <div className="filter-left">
-                <div className="filter-group-inline"><span className="filter-label-inline">状态</span><div className="status-filters">{["owned", "preorder", "wishlist"].map(s => <button key={s} className={`status-chip ${statusFilter === s ? "active" : ""}`} onClick={() => setStatusFilter(statusFilter === s ? "" : s)}>{statusLabel(s)}</button>)}</div></div>
+                <div className="filter-group-inline"><span className="filter-label-inline">状态</span><div className="status-filters">{["owned", "preorder", "wishlist"].map(s => <button key={s} className={`status-chip ${statusFilter.includes(s) ? "active" : ""}`} onClick={() => toggleFilterValue(statusFilter, s, setStatusFilter)}>{statusLabel(s)}</button>)}</div></div>
                 <div className="filter-divider-pipe">|</div>
-                <div className="filter-group-inline"><span className="filter-label-inline">分类</span><div className="category-filters">{categoryOptions.map(c => <button key={c} className={`category-chip ${categoryFilter === c ? "active" : ""}`} onClick={() => setCategoryFilter(categoryFilter === c ? "" : c)}>{c}</button>)}</div></div>
+                <div className="filter-group-inline"><span className="filter-label-inline">分类</span><div className="category-filters">{categoryOptions.map(c => <button key={c} className={`category-chip ${categoryFilter.includes(c) ? "active" : ""}`} onClick={() => toggleFilterValue(categoryFilter, c, setCategoryFilter)}>{c}</button>)}</div></div>
               </div>
               <div className="filter-right">
+                <button
+                  className="sort-toggle-btn"
+                  onClick={() => {
+                    const next = sortDirection === "asc" ? "desc" : "asc";
+                    setSortDirection(next);
+                    localStorage.setItem("neko_sort_direction", next);
+                  }}
+                  title={sortDirection === "asc" ? "当前按 a-Z 排序，点击切换为 Z-a" : "当前按 Z-a 排序，点击切换为 a-Z"}
+                >
+                  {sortDirection === "asc" ? "A-Z" : "Z-A"}
+                </button>
                 <div className="view-toggle">
                   <button 
                     className={`view-toggle-btn ${viewMode === "grid" ? "active" : ""}`} 
@@ -1682,7 +1756,26 @@ function App() {
                     <div className="volume-cell">{fmtPlatform(v.platform)}</div>
                     <div className="volume-cell"><span className={`status-badge ${statusClass(v.purchase_status)}`}>{statusLabel(v.purchase_status)}</span></div>
                     <div className="volume-cell volume-row-actions" onClick={e => e.stopPropagation()}>
-                      {loggedIn && <><button className="action-icon-btn" onClick={() => openVolumeModal(i)}>✎</button><button className="action-icon-btn danger" onClick={() => askConfirm("确定要删除这个分册吗？", async () => { const nv = [...selectedItem.book_volumes]; nv.splice(i, 1); await apiRequest(`${API_BASE}/items/${selectedItem.id}`, { method: "PUT", body: JSON.stringify(itemToPayload({ ...selectedItem, book_volumes: nv })) }); await refreshAll(); })}>🗑</button></>}
+                      {loggedIn && <>
+                        <button
+                          className="action-icon-btn"
+                          title="上移"
+                          onClick={() => moveSelectedVolume(i, -1)}
+                          disabled={i === 0}
+                        >
+                          ↑
+                        </button>
+                        <button
+                          className="action-icon-btn"
+                          title="下移"
+                          onClick={() => moveSelectedVolume(i, 1)}
+                          disabled={i === selectedItem.book_volumes.length - 1}
+                        >
+                          ↓
+                        </button>
+                        <button className="action-icon-btn" title="编辑" onClick={() => openVolumeModal(i)}>✎</button>
+                        <button className="action-icon-btn danger" title="删除" onClick={() => askConfirm("确定要删除这个分册吗？", async () => { const nv = [...selectedItem.book_volumes]; nv.splice(i, 1); await updateSelectedItemVolumes(nv); })}>🗑</button>
+                      </>}
                     </div>
                   </div>
                 ))}
