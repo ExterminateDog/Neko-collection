@@ -153,6 +153,49 @@ function getItemSortInitial(label) {
   return "~";
 }
 
+function getEarliestVolumePurchaseDate(volumes = []) {
+  return (volumes || [])
+    .map(volume => String(volume?.purchase_date || "").trim())
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b))[0] || "";
+}
+
+function getVolumeProfitEstimateTotal(volumes = []) {
+  return (volumes || []).reduce((sum, volume) => {
+    if (!["owned", "preorder"].includes(volume?.purchase_status)) return sum;
+    const listPriceCny = Number(volume?.list_price_cny || 0);
+    const purchasePriceCny = Number(volume?.purchase_price_cny || 0);
+    if (!Number.isFinite(listPriceCny) || !Number.isFinite(purchasePriceCny) || listPriceCny <= 0) return sum;
+    return sum + (listPriceCny - purchasePriceCny);
+  }, 0);
+}
+
+function getVolumeListPriceTotal(volumes = []) {
+  return (volumes || []).reduce((sum, volume) => {
+    const listPriceCny = Number(volume?.list_price_cny || 0);
+    if (!Number.isFinite(listPriceCny) || listPriceCny <= 0) return sum;
+    return sum + listPriceCny;
+  }, 0);
+}
+
+function getItemListPriceForDisplay(item) {
+  if (item?.category === "书籍" && item?.is_series) {
+    return getVolumeListPriceTotal(item.book_volumes);
+  }
+  return Number(item?.list_price_cny || 0);
+}
+
+function getItemProfitEstimate(item) {
+  if (!["owned", "preorder"].includes(item?.status)) return null;
+  if (item?.category === "书籍" && item?.is_series) {
+    return getVolumeProfitEstimateTotal(item.book_volumes);
+  }
+  const listPriceCny = Number(item?.list_price_cny || 0);
+  const purchasePrice = Number(item?.purchase_price || 0);
+  if (!Number.isFinite(listPriceCny) || !Number.isFinite(purchasePrice) || listPriceCny <= 0) return null;
+  return listPriceCny - purchasePrice;
+}
+
 function initialItemForm() {
   return { name: "", category: "手办", status: "owned", platform: "", purchase_price: "", purchase_currency: "CNY", list_price_amount: "", list_price_currency: "CNY", book_edition_type: "普通版", author: "", publisher: "", manufacturer: "", purchase_date: "", tags: [], notes: "", image_data: null, is_series: true, is_private: false };
 }
@@ -643,7 +686,7 @@ function App() {
       if (statusFilter.length && !statusFilter.includes(item.status)) return false;
       if (categoryFilter.length && !categoryFilter.includes(item.category)) return false;
       if (!q) return true;
-      return [item.name, item.series_name, item.category, item.platform, ...(item.tags || [])].filter(Boolean).join(" ").toLowerCase().includes(q);
+      return [item.name, item.series_name, item.category, item.platform, item.author, item.publisher, ...(item.tags || [])].filter(Boolean).join(" ").toLowerCase().includes(q);
     }).sort((a, b) => {
       const aLabel = String(a.series_name || a.name || "").trim();
       const bLabel = String(b.series_name || b.name || "").trim();
@@ -896,6 +939,17 @@ function App() {
   const toggleFilterValue = (currentValues, nextValue, setter) => {
     setter(currentValues.includes(nextValue) ? currentValues.filter(value => value !== nextValue) : [...currentValues, nextValue]);
   };
+  const selectedItemPurchaseDate = useMemo(() => {
+    if (!selectedItem) return "";
+    if (selectedItem.category === "书籍" && selectedItem.is_series) {
+      return getEarliestVolumePurchaseDate(selectedItem.book_volumes);
+    }
+    return String(selectedItem.purchase_date || "").trim();
+  }, [selectedItem]);
+  const selectedItemVolumeProfitTotal = useMemo(() => {
+    if (!selectedItem || selectedItem.category !== "书籍" || !selectedItem.is_series) return null;
+    return getVolumeProfitEstimateTotal(selectedItem.book_volumes);
+  }, [selectedItem]);
 
   return (
     <>
@@ -954,7 +1008,7 @@ function App() {
                     ≡
                   </button>
                 </div>
-                <label className="search-wrap"><input type="search" value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder="搜索名称 / 标签 / 平台" /></label>
+                <label className="search-wrap"><input type="search" value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder="搜索名称 / 标签 / 平台 / 作者 / 出版社" /></label>
               </div>
             </div>
             <div className={viewMode === "grid" ? "collection-grid" : "collection-list"}>
@@ -987,8 +1041,8 @@ function App() {
                         <div className="price-status-row"><strong>{fmtMoney(item.category === "书籍" ? item.total_spent_cny : item.purchase_price)}</strong><span className={`status-pill ${statusClass(item.status)}`}>{statusLabel(item.status)}</span></div>
                         {item.tags?.length > 0 && (
                           <div className="item-tags-row" style={{ marginTop: "0.25rem" }}>
-                            {item.tags.slice(0, 3).map((t, i) => <span key={i} className="item-tag-sm">{t}</span>)}
-                            {item.tags.length > 3 && <span className="item-tag-sm">...</span>}
+                            {item.tags.slice(0, 4).map((t, i) => <span key={i} className="item-tag-sm">{t}</span>)}
+                            {item.tags.length > 4 && <span className="item-tag-sm">...</span>}
                           </div>
                         )}
                       </div>
@@ -1031,13 +1085,12 @@ function App() {
                           {item.tags?.length > 0 ? item.tags.slice(0, 2).map((t, i) => <span key={i} className="item-tag-sm">{t}</span>) : "-"}
                         </div>
                         <div className="lv-col col-price"><strong>{fmtMoney(item.category === "书籍" ? item.total_spent_cny : item.purchase_price)}</strong></div>
-                        <div className="lv-col col-list">{fmtMoney(item.list_price_cny)}</div>
+                        <div className="lv-col col-list">{fmtMoney(getItemListPriceForDisplay(item))}</div>
                         <div className="lv-col col-diff">
-                          {item.status === "owned" && item.list_price_cny > 0 ? (() => {
-                            const cost = item.category === "书籍" ? item.total_spent_cny : item.purchase_price;
-                            const diff = item.list_price_cny - cost;
-                            return <span className={diff >= 0 ? "diff-positive" : "diff-negative"}>{fmtSignedMoney(diff)}</span>;
-                          })() : "-"}
+                          {(() => {
+                            const diff = getItemProfitEstimate(item);
+                            return diff === null ? "-" : <span className={diff >= 0 ? "diff-positive" : "diff-negative"}>{fmtSignedMoney(diff)}</span>;
+                          })()}
                         </div>
                         <div className="lv-col col-status"><span className={`status-pill small ${statusClass(item.status)}`}>{statusLabel(item.status)}</span></div>
                       </div>
@@ -1688,7 +1741,7 @@ function App() {
                 )}
                 <div className="detail-meta">
                   <div className="detail-line"><strong>分类</strong> {selectedItem.category}</div>
-                  {selectedItem.manufacturer && <div className="detail-line"><strong>厂商</strong> {selectedItem.manufacturer}</div>}
+                  {selectedItem.category !== "书籍" && selectedItem.manufacturer && <div className="detail-line"><strong>厂商</strong> {selectedItem.manufacturer}</div>}
                   {!(selectedItem.category === "书籍" && selectedItem.is_series) && (
                     <>
                       <div className="detail-line"><strong>商品定价</strong> {fmtOriginalPrice(selectedItem.list_price_amount, selectedItem.list_price_currency, selectedItem.list_price_cny)}</div>
@@ -1701,14 +1754,16 @@ function App() {
                       <div className="detail-line"><strong>出版社</strong> {selectedItem.publisher || "-"}</div>
                       {!selectedItem.is_series && <div className="detail-line"><strong>版本</strong> {selectedItem.book_edition_type || "-"}</div>}
                       <div className="detail-line"><strong>总消费</strong> {fmtMoney(selectedItem.total_spent_cny)}</div>
+                      <div className="detail-line"><strong>购买时间</strong> {selectedItemPurchaseDate || "-"}</div>
+                      {selectedItem.is_series && <div className="detail-line"><strong>盈亏估算</strong> <span className={(selectedItemVolumeProfitTotal || 0) >= 0 ? "diff-positive" : "diff-negative"}>{fmtSignedMoney(selectedItemVolumeProfitTotal || 0)}</span></div>}
                     </>
                   ) : (
                     <>
                       <div className="detail-line"><strong>购买价格</strong> {fmtMoney(selectedItem.purchase_price)}</div>
-                      {selectedItem.status !== "wishlist" && <div className="detail-line"><strong>购买日期</strong> {selectedItem.purchase_date || "-"}</div>}
+                      <div className="detail-line"><strong>购买时间</strong> {selectedItemPurchaseDate || "-"}</div>
                     </>
                   )}
-                  {selectedItem.status === "owned" && selectedItem.list_price_cny > 0 && (selectedItem.purchase_price > 0 || (selectedItem.category === "书籍" && selectedItem.total_spent_cny > 0)) && (
+                  {["owned", "preorder"].includes(selectedItem.status) && selectedItem.list_price_cny > 0 && (selectedItem.purchase_price > 0 || (selectedItem.category === "书籍" && selectedItem.total_spent_cny > 0)) && (
                     <div className="detail-line">
                       <strong>盈亏估算</strong>
                       {(() => {
@@ -1747,7 +1802,7 @@ function App() {
                     <div className="volume-cell volume-number">{fmtMoney(v.purchase_price_cny)}</div>
                     <div className="volume-cell volume-number">{fmtPriceByCurrency(v.list_price_amount, v.list_price_currency)}</div>
                     <div className="volume-cell">
-                      {v.purchase_status === "owned" && v.list_price_cny > 0 ? (
+                      {["owned", "preorder"].includes(v.purchase_status) && v.list_price_cny > 0 ? (
                         <span className={v.list_price_cny - v.purchase_price_cny >= 0 ? "diff-positive" : "diff-negative"}>
                           {fmtSignedMoney(v.list_price_cny - v.purchase_price_cny)}
                         </span>
@@ -1807,7 +1862,7 @@ function App() {
                   <div className="detail-line"><strong>购买价格</strong> {fmtMoney(selectedVolume.purchase_price_cny)}</div>
                   <div className="detail-line"><strong>商品定价</strong> {fmtPriceByCurrency(selectedVolume.list_price_amount, selectedVolume.list_price_currency)}</div>
                   {selectedVolume.purchase_status !== "wishlist" && <div className="detail-line"><strong>购买日期</strong> {selectedVolume.purchase_date || "-"}</div>}
-                  {selectedVolume.purchase_status === "owned" && selectedVolume.list_price_cny > 0 && selectedVolume.purchase_price_cny > 0 && (
+                  {["owned", "preorder"].includes(selectedVolume.purchase_status) && selectedVolume.list_price_cny > 0 && selectedVolume.purchase_price_cny > 0 && (
                     <div className="detail-line">
                       <strong>盈亏估算</strong>
                       {(() => {
