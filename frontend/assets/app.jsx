@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 
 const API_BASE = "/api";
@@ -125,6 +125,43 @@ function toNumberOrNull(value) {
   const num = Number(String(value ?? "").trim());
   return Number.isFinite(num) ? num : null;
 }
+function sanitizeDateInput(value) {
+  const digits = String(value ?? "").replace(/\D/g, "").slice(0, 8);
+  if (digits.length <= 4) return digits;
+  let month = digits.slice(4, 6);
+  let day = digits.slice(6);
+  if (month.length === 2) month = pad2(Math.min(Math.max(Number(month) || 1, 1), 12));
+  if (day.length === 2) day = pad2(Math.min(Math.max(Number(day) || 1, 1), 31));
+  if (digits.length <= 6) return `${digits.slice(0, 4)}-${month}`;
+  return `${digits.slice(0, 4)}-${month}-${day}`;
+}
+function pad2(value) {
+  return String(value).padStart(2, "0");
+}
+function formatDateValue(date) {
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+}
+function parseDateValue(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || ""));
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(year, month - 1, day);
+  if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) return null;
+  return date;
+}
+function getCalendarDays(monthDate) {
+  const year = monthDate.getFullYear();
+  const month = monthDate.getMonth();
+  const first = new Date(year, month, 1);
+  const start = new Date(year, month, 1 - first.getDay());
+  return Array.from({ length: 42 }, (_, index) => {
+    const date = new Date(start);
+    date.setDate(start.getDate() + index);
+    return date;
+  });
+}
 function fileToDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -186,10 +223,10 @@ function getItemListPriceForDisplay(item) {
 }
 
 function getItemProfitEstimate(item) {
-  if (!["owned", "preorder"].includes(item?.status)) return null;
   if (item?.category === "书籍" && item?.is_series) {
     return getVolumeProfitEstimateTotal(item.book_volumes);
   }
+  if (!["owned", "preorder"].includes(item?.status)) return null;
   const listPriceCny = Number(item?.list_price_cny || 0);
   const purchasePrice = Number(item?.purchase_price || 0);
   if (!Number.isFinite(listPriceCny) || !Number.isFinite(purchasePrice) || listPriceCny <= 0) return null;
@@ -284,6 +321,137 @@ function AutocompleteInput({ value, onChange, suggestions = [], placeholder, cla
             </li>
           ))}
         </ul>
+      )}
+    </div>
+  );
+}
+
+function LoginFormPanel({ loginForm, setLoginForm, showPassword, setShowPassword, onSubmit, submitLabel = "登录" }) {
+  return (
+    <form className="form-grid one-col" onSubmit={onSubmit}>
+      <label style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+        <span style={{ fontWeight: 700, fontSize: "0.95rem" }}>密码</span>
+        <div className="password-input-wrap">
+          <input
+            type={showPassword ? "text" : "password"}
+            value={loginForm.password}
+            onChange={e => setLoginForm({ ...loginForm, password: e.target.value })}
+            required
+            placeholder="请输入管理员密码"
+          />
+          <button
+            type="button"
+            className="password-toggle-btn"
+            onClick={() => setShowPassword(!showPassword)}
+            tabIndex="-1"
+          >
+            {showPassword ? <div className="eye-icon"></div> : <div className="eye-off-icon"></div>}
+          </button>
+        </div>
+      </label>
+      <div style={{ marginTop: "0.5rem", width: "100%", display: "flex", justifyContent: "flex-start" }}>
+        <label className="checkbox-group" style={{ margin: 0 }}>
+          <input type="checkbox" checked={loginForm.remember} onChange={e => setLoginForm({ ...loginForm, remember: e.target.checked })} />
+          <span>记住密码</span>
+        </label>
+      </div>
+      <div className="form-actions" style={{ marginTop: "1.5rem", width: "100%" }}>
+        <button type="submit" className="btn primary" style={{ width: "100%", height: "3.25rem", fontSize: "1.1rem", borderRadius: "14px" }}>{submitLabel}</button>
+      </div>
+    </form>
+  );
+}
+
+function DatePickerInput({ value, onChange, required = false }) {
+  const [open, setOpen] = useState(false);
+  const selectedDate = parseDateValue(value);
+  const [visibleMonth, setVisibleMonth] = useState(() => selectedDate || new Date());
+  const wrapRef = useRef(null);
+  const inputRef = useRef(null);
+  const todayValue = formatDateValue(new Date());
+  const visibleYear = visibleMonth.getFullYear();
+  const visibleMonthIndex = visibleMonth.getMonth();
+  const days = getCalendarDays(visibleMonth);
+
+  useEffect(() => {
+    if (selectedDate) setVisibleMonth(new Date(selectedDate.getFullYear(), selectedDate.getMonth(), 1));
+  }, [value]);
+
+  useEffect(() => {
+    const handleOutsideClick = (e) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", handleOutsideClick, true);
+    return () => document.removeEventListener("pointerdown", handleOutsideClick, true);
+  }, []);
+
+  const changeMonth = (offset) => {
+    setVisibleMonth(prev => new Date(prev.getFullYear(), prev.getMonth() + offset, 1));
+  };
+
+  const pickDate = (date) => {
+    onChange(formatDateValue(date));
+    setOpen(false);
+  };
+
+  const handleInputChange = (e) => {
+    const next = sanitizeDateInput(e.target.value);
+    onChange(next);
+    requestAnimationFrame(() => {
+      const input = inputRef.current;
+      if (input) input.setSelectionRange(next.length, next.length);
+    });
+  };
+
+  return (
+    <div className="date-picker" ref={wrapRef}>
+      <div className="date-input-wrap">
+        <input
+          ref={inputRef}
+          type="text"
+          inputMode="numeric"
+          value={value || ""}
+          onFocus={() => setOpen(true)}
+          onChange={handleInputChange}
+          placeholder="YYYY-MM-DD"
+          pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}"
+          required={required}
+        />
+        <button type="button" className="date-picker-trigger" onClick={() => setOpen(prev => !prev)} title="选择日期">日</button>
+      </div>
+      {open && (
+        <div className="date-picker-popover">
+          <div className="date-picker-head">
+            <button type="button" className="date-nav-btn" onClick={() => changeMonth(-1)} title="上个月">‹</button>
+            <strong>{visibleYear} 年 {visibleMonthIndex + 1} 月</strong>
+            <button type="button" className="date-nav-btn" onClick={() => changeMonth(1)} title="下个月">›</button>
+          </div>
+          <div className="date-week-row">
+            {["日", "一", "二", "三", "四", "五", "六"].map(day => <span key={day}>{day}</span>)}
+          </div>
+          <div className="date-grid">
+            {days.map(date => {
+              const dateValue = formatDateValue(date);
+              const muted = date.getMonth() !== visibleMonthIndex;
+              const selected = value === dateValue;
+              const today = todayValue === dateValue;
+              return (
+                <button
+                  type="button"
+                  key={dateValue}
+                  className={`date-day ${muted ? "muted" : ""} ${selected ? "selected" : ""} ${today ? "today" : ""}`}
+                  onClick={() => pickDate(date)}
+                >
+                  {date.getDate()}
+                </button>
+              );
+            })}
+          </div>
+          <div className="date-picker-actions">
+            <button type="button" className="date-link-btn" onClick={() => onChange("")}>清空</button>
+            <button type="button" className="date-link-btn primary" onClick={() => pickDate(new Date())}>今天</button>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -411,6 +579,13 @@ function drawBarChart(canvas, data, isYearly) {
 function App() {
   const [token, setToken] = useState(localStorage.getItem("neko_token") || "");
   const [user, setUser] = useState(null);
+  const [hasEnteredApp, setHasEnteredApp] = useState(() => {
+    try {
+      return Boolean(sessionStorage.getItem("neko_entry_mode"));
+    } catch {
+      return false;
+    }
+  });
   const [items, setItems] = useState([]);
   const [stats, setStats] = useState({ events: [] });
   const [rates, setRates] = useState([]);
@@ -440,6 +615,20 @@ function App() {
   const [notificationConfig, setNotificationConfig] = useState({ title: "", message: "", type: "info" });
   const [confirmConfig, setConfirmConfig] = useState({ show: false, title: "确认", message: "", onConfirm: null });
   const [lightboxSrc, setLightboxSrc] = useState("");
+
+  const enterApp = useCallback((mode) => {
+    setHasEnteredApp(true);
+    try {
+      sessionStorage.setItem("neko_entry_mode", mode);
+    } catch {}
+  }, []);
+
+  const returnToEntry = useCallback(() => {
+    setHasEnteredApp(false);
+    try {
+      sessionStorage.removeItem("neko_entry_mode");
+    } catch {}
+  }, []);
 
   const notify = (message, title = "提示", type = "info") => {
     setNotificationConfig({ title, message, type });
@@ -502,6 +691,42 @@ function App() {
     }
     return data;
   }, [token]);
+
+  const handleLoginSubmit = useCallback(async (e) => {
+    e?.preventDefault?.();
+    try {
+      const d = await apiRequest(`${API_BASE}/login`, { method: "POST", body: JSON.stringify({ password: loginForm.password }) });
+      setToken(d.token);
+      setUser(d.user);
+      localStorage.setItem("neko_token", d.token);
+      if (loginForm.remember) {
+        localStorage.setItem("neko_remembered_password", loginForm.password);
+      } else {
+        localStorage.removeItem("neko_remembered_password");
+      }
+      setShowLogin(false);
+      setShowPassword(false);
+      enterApp("login");
+      if (!loginForm.remember) setLoginForm(prev => ({ ...prev, password: "" }));
+    } catch (err) {
+      notify(err.message, "错误", "error");
+    }
+  }, [apiRequest, enterApp, loginForm]);
+
+  const handleLogout = useCallback(async () => {
+    try {
+      await apiRequest(`${API_BASE}/logout`, { method: "POST" });
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setToken("");
+      setUser(null);
+      setShowLogin(false);
+      setShowSettings(false);
+      localStorage.removeItem("neko_token");
+      returnToEntry();
+    }
+  }, [apiRequest, returnToEntry]);
 
   const refreshAll = useCallback(async () => {
     try {
@@ -954,160 +1179,194 @@ function App() {
   return (
     <>
       <div className="bg-orb orb-a"></div><div className="bg-orb orb-b"></div>
-      <header className="topbar">
-        <div className="brand"><img className="brand-logo" src="assets/logo.png" alt="logo" /><h1 className="brand-overline">Neko Collection</h1></div>
-        <nav className="nav-tabs">
-          <button className="tab-btn" onClick={async () => { await apiRequest(`${API_BASE}/stats`).then(d => setStats(d)); setShowStats(true); }}>📊 统计</button>
-          {loggedIn && <button className="tab-btn" onClick={() => setShowSettings(true)}>⚙️ 设置</button>}
-        </nav>
-        <div className="auth-area">
-          {!loggedIn ? <button className="btn ghost small" onClick={() => setShowLogin(true)}>🔑 登录</button> : <button className="btn ghost small logout-btn" onClick={async () => { await apiRequest(`${API_BASE}/logout`, { method: "POST" }); setToken(""); setUser(null); localStorage.removeItem("neko_token"); }}>🚪 退出</button>}
-        </div>
-      </header>
-
-      <main className="container">
-        <section className="view-section">
-          {!loggedIn && <div className="readonly-tip">当前为只读模式，登录后可管理收藏品与设置。</div>}
-          <div className="panel">
-            <div className="summary">
-              <div className="summary-card total"><div className="k">总数</div><div className="v">{summary.total}</div></div>
-              <div className="summary-card wishlist"><div className="k">未购买</div><div className="v">{summary.wishlist}</div></div>
-              <div className="summary-card spend"><div className="k">总支出</div><div className="v">{fmtMoney(summary.spend)}</div></div>
+      {!hasEnteredApp ? (
+        <main className="entry-shell">
+          <section className="entry-card">
+            <div className="brand entry-brand centered">
+              <img className="brand-logo" src="assets/logo.png" alt="logo" />
+              <h1 className="brand-overline">Neko Collection</h1>
             </div>
-            <div className="filter-row">
-              <div className="filter-left">
-                <div className="filter-group-inline"><span className="filter-label-inline">状态</span><div className="status-filters">{["owned", "preorder", "wishlist"].map(s => <button key={s} className={`status-chip ${statusFilter.includes(s) ? "active" : ""}`} onClick={() => toggleFilterValue(statusFilter, s, setStatusFilter)}>{statusLabel(s)}</button>)}</div></div>
-                <div className="filter-divider-pipe">|</div>
-                <div className="filter-group-inline"><span className="filter-label-inline">分类</span><div className="category-filters">{categoryOptions.map(c => <button key={c} className={`category-chip ${categoryFilter.includes(c) ? "active" : ""}`} onClick={() => toggleFilterValue(categoryFilter, c, setCategoryFilter)}>{c}</button>)}</div></div>
-              </div>
-              <div className="filter-right">
-                <button
-                  className="sort-toggle-btn"
-                  onClick={() => {
-                    const next = sortDirection === "asc" ? "desc" : "asc";
-                    setSortDirection(next);
-                    localStorage.setItem("neko_sort_direction", next);
-                  }}
-                  title={sortDirection === "asc" ? "当前按 a-Z 排序，点击切换为 Z-a" : "当前按 Z-a 排序，点击切换为 a-Z"}
-                >
-                  {sortDirection === "asc" ? "A-Z" : "Z-A"}
-                </button>
-                <div className="view-toggle">
-                  <button 
-                    className={`view-toggle-btn ${viewMode === "grid" ? "active" : ""}`} 
-                    onClick={() => { setViewMode("grid"); localStorage.setItem("neko_view_mode", "grid"); }}
-                    title="网格视图"
-                  >
-                    田
-                  </button>
-                  <button 
-                    className={`view-toggle-btn ${viewMode === "list" ? "active" : ""}`} 
-                    onClick={() => { setViewMode("list"); localStorage.setItem("neko_view_mode", "list"); }}
-                    title="列表视图"
-                  >
-                    ≡
-                  </button>
+            {loggedIn ? (
+              <>
+                <div className="entry-actions">
+                  <button className="btn primary" style={{ width: "100%", height: "3.25rem", fontSize: "1.05rem" }} onClick={() => enterApp("login")}>进入首页</button>
+                  <button className="btn ghost" style={{ width: "100%" }} onClick={handleLogout}>退出当前账号</button>
                 </div>
-                <label className="search-wrap"><input type="search" value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder="搜索名称 / 标签 / 平台 / 作者 / 出版社" /></label>
-              </div>
+              </>
+            ) : (
+              <>
+                <LoginFormPanel
+                  loginForm={loginForm}
+                  setLoginForm={setLoginForm}
+                  showPassword={showPassword}
+                  setShowPassword={setShowPassword}
+                  onSubmit={handleLoginSubmit}
+                  submitLabel="登录并进入"
+                />
+                <div className="entry-divider"><span>或</span></div>
+                <button className="btn ghost entry-guest-btn" onClick={() => { setShowPassword(false); enterApp("guest"); }}>游客访问</button>
+              </>
+            )}
+          </section>
+        </main>
+      ) : (
+        <>
+          <header className="topbar">
+            <div className="brand"><img className="brand-logo" src="assets/logo.png" alt="logo" /><h1 className="brand-overline">Neko Collection</h1></div>
+            <nav className="nav-tabs">
+              <button className="tab-btn" onClick={async () => { await apiRequest(`${API_BASE}/stats`).then(d => setStats(d)); setShowStats(true); }}>📊 统计</button>
+              {loggedIn && <button className="tab-btn" onClick={() => setShowSettings(true)}>⚙️ 设置</button>}
+            </nav>
+            <div className="auth-area">
+              {!loggedIn ? <button className="btn ghost small logout-btn" onClick={returnToEntry}>🚪 退出</button> : <button className="btn ghost small logout-btn" onClick={handleLogout}>🚪 退出</button>}
             </div>
-            <div className={viewMode === "grid" ? "collection-grid" : "collection-list"}>
-              {!filteredItems.length ? <div className="empty-state">暂无数据</div> : (
-                viewMode === "grid" ? (
-                  filteredItems.map(item => (
-                    <article key={item.id} className="item-card" onClick={async () => { await apiRequest(`${API_BASE}/items/${item.id}`).then(d => { setSelectedItem(d.item); setShowDetail(true); }); }}>
-                      <div className="item-image-wrap">
-                        {item.image_data ? <img className="item-image" src={item.image_data} alt={item.name} /> : <div className="item-placeholder">N</div>}
-                      </div>
-                      <div className="item-body">
-                        <h3 className="item-title">{item.series_name || item.name}</h3>
-                        <div className="category-progress-row">
-                          <div className="item-category-group">
-                            {item.category === "书籍" ? "📚 " : "✨ "}{item.category}
-                          </div>
-                          <div className="item-meta-group">
-                            {item.is_private && <span className="private-badge">🔒 私密</span>}
-                            {item.category === "书籍" && (item.book_volumes || []).length > 0 && (() => {
-                              const owned = item.book_volumes.filter(v => v.purchase_status === "owned").length, total = item.book_volumes.length;
-                              return (
-                                <div className="inline-progress">
-                                  <div className="progress-bar-bg"><div className="progress-bar-fill" style={{ width: `${(owned/total)*100}%` }}></div></div>
-                                  <span className="progress-text">{owned}/{total}</span>
-                                </div>
-                              );
-                            })()}
-                          </div>
-                        </div>
-                        <div className="price-status-row"><strong>{fmtMoney(item.category === "书籍" ? item.total_spent_cny : item.purchase_price)}</strong><span className={`status-pill ${statusClass(item.status)}`}>{statusLabel(item.status)}</span></div>
-                        {item.tags?.length > 0 && (
-                          <div className="item-tags-row" style={{ marginTop: "0.25rem" }}>
-                            {item.tags.slice(0, 4).map((t, i) => <span key={i} className="item-tag-sm">{t}</span>)}
-                            {item.tags.length > 4 && <span className="item-tag-sm">...</span>}
-                          </div>
-                        )}
-                      </div>
-                    </article>
-                  ))
-                ) : (
-                  <div className="list-view-table">
-                    <div className="list-view-header">
-                      <div className="lv-col col-img"></div>
-                      <div className="lv-col col-name">名称</div>
-                      <div className="lv-col col-tags">标签</div>
-                      <div className="lv-col col-price">购买价</div>
-                      <div className="lv-col col-list">定价</div>
-                      <div className="lv-col col-diff">盈亏</div>
-                      <div className="lv-col col-status">状态</div>
+          </header>
+
+          <main className="container">
+            <section className="view-section">
+              {!loggedIn && <div className="readonly-tip">当前为只读模式，登录后可管理收藏品与设置。</div>}
+              <div className="panel">
+                <div className="summary">
+                  <div className="summary-card total"><div className="k">总数</div><div className="v">{summary.total}</div></div>
+                  <div className="summary-card wishlist"><div className="k">未购买</div><div className="v">{summary.wishlist}</div></div>
+                  <div className="summary-card spend"><div className="k">总支出</div><div className="v">{fmtMoney(summary.spend)}</div></div>
+                </div>
+                <div className="filter-row">
+                  <div className="filter-left">
+                    <div className="filter-group-inline"><span className="filter-label-inline">状态</span><div className="status-filters">{["owned", "preorder", "wishlist"].map(s => <button key={s} className={`status-chip ${statusFilter.includes(s) ? "active" : ""}`} onClick={() => toggleFilterValue(statusFilter, s, setStatusFilter)}>{statusLabel(s)}</button>)}</div></div>
+                    <div className="filter-divider-pipe">|</div>
+                    <div className="filter-group-inline"><span className="filter-label-inline">分类</span><div className="category-filters">{categoryOptions.map(c => <button key={c} className={`category-chip ${categoryFilter.includes(c) ? "active" : ""}`} onClick={() => toggleFilterValue(categoryFilter, c, setCategoryFilter)}>{c}</button>)}</div></div>
+                  </div>
+                  <div className="filter-right">
+                    <button
+                      className="sort-toggle-btn"
+                      onClick={() => {
+                        const next = sortDirection === "asc" ? "desc" : "asc";
+                        setSortDirection(next);
+                        localStorage.setItem("neko_sort_direction", next);
+                      }}
+                      title={sortDirection === "asc" ? "当前按 a-Z 排序，点击切换为 Z-a" : "当前按 Z-a 排序，点击切换为 a-Z"}
+                    >
+                      {sortDirection === "asc" ? "A-Z" : "Z-A"}
+                    </button>
+                    <div className="view-toggle">
+                      <button 
+                        className={`view-toggle-btn ${viewMode === "grid" ? "active" : ""}`} 
+                        onClick={() => { setViewMode("grid"); localStorage.setItem("neko_view_mode", "grid"); }}
+                        title="网格视图"
+                      >
+                        田
+                      </button>
+                      <button 
+                        className={`view-toggle-btn ${viewMode === "list" ? "active" : ""}`} 
+                        onClick={() => { setViewMode("list"); localStorage.setItem("neko_view_mode", "list"); }}
+                        title="列表视图"
+                      >
+                        ≡
+                      </button>
                     </div>
-                    {filteredItems.map(item => (
-                      <div key={item.id} className="list-view-row" onClick={async () => { await apiRequest(`${API_BASE}/items/${item.id}`).then(d => { setSelectedItem(d.item); setShowDetail(true); }); }}>
-                        <div className="lv-col col-img">
-                          {item.image_data ? <img src={item.image_data} alt={item.name} /> : <div className="lv-img-placeholder">N</div>}
+                    <label className="search-wrap"><input type="search" value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder="搜索名称 / 标签 / 平台 / 作者 / 出版社" /></label>
+                  </div>
+                </div>
+                <div className={viewMode === "grid" ? "collection-grid" : "collection-list"}>
+                  {!filteredItems.length ? <div className="empty-state">暂无数据</div> : (
+                    viewMode === "grid" ? (
+                      filteredItems.map(item => (
+                        <article key={item.id} className="item-card" onClick={async () => { await apiRequest(`${API_BASE}/items/${item.id}`).then(d => { setSelectedItem(d.item); setShowDetail(true); }); }}>
+                          <div className="item-image-wrap">
+                            {item.image_data ? <img className="item-image" src={item.image_data} alt={item.name} /> : <div className="item-placeholder">N</div>}
+                          </div>
+                          <div className="item-body">
+                            <h3 className="item-title">{item.series_name || item.name}</h3>
+                            <div className="category-progress-row">
+                              <div className="item-category-group">
+                                {item.category === "书籍" ? "📚 " : "✨ "}{item.category}
+                              </div>
+                              <div className="item-meta-group">
+                                {item.is_private && <span className="private-badge">🔒 私密</span>}
+                                {item.category === "书籍" && (item.book_volumes || []).length > 0 && (() => {
+                                  const owned = item.book_volumes.filter(v => v.purchase_status === "owned").length, total = item.book_volumes.length;
+                                  return (
+                                    <div className="inline-progress">
+                                      <div className="progress-bar-bg"><div className="progress-bar-fill" style={{ width: `${(owned/total)*100}%` }}></div></div>
+                                      <span className="progress-text">{owned}/{total}</span>
+                                    </div>
+                                  );
+                                })()}
+                              </div>
+                            </div>
+                            <div className="price-status-row"><strong>{fmtMoney(item.category === "书籍" ? item.total_spent_cny : item.purchase_price)}</strong><span className={`status-pill ${statusClass(item.status)}`}>{statusLabel(item.status)}</span></div>
+                            {item.tags?.length > 0 && (
+                              <div className="item-tags-row" style={{ marginTop: "0.25rem" }}>
+                                {item.tags.slice(0, 4).map((t, i) => <span key={i} className="item-tag-sm">{t}</span>)}
+                                {item.tags.length > 4 && <span className="item-tag-sm">...</span>}
+                              </div>
+                            )}
+                          </div>
+                        </article>
+                      ))
+                    ) : (
+                      <div className="list-view-table">
+                        <div className="list-view-header">
+                          <div className="lv-col col-img"></div>
+                          <div className="lv-col col-name">名称</div>
+                          <div className="lv-col col-tags">标签</div>
+                          <div className="lv-col col-price">购买价</div>
+                          <div className="lv-col col-list">定价</div>
+                          <div className="lv-col col-diff">盈亏</div>
+                          <div className="lv-col col-status">状态</div>
                         </div>
-                        <div className="lv-col col-name">
-                          <div className="lv-name-wrap">
-                            <div className="lv-name-text">{item.series_name || item.name}</div>
-                            <div className="item-meta-group inline">
-                              {item.is_private && <span className="private-badge mini">🔒 私密</span>}
-                              {item.category === "书籍" && (item.book_volumes || []).length > 0 && (() => {
-                                const owned = item.book_volumes.filter(v => v.purchase_status === "owned").length, total = item.book_volumes.length;
-                                return (
-                                  <div className="inline-progress">
-                                    <div className="progress-bar-bg"><div className="progress-bar-fill" style={{ width: `${(owned/total)*100}%` }}></div></div>
-                                    <span className="progress-text">{owned}/{total}</span>
-                                  </div>
-                                );
+                        {filteredItems.map(item => (
+                          <div key={item.id} className="list-view-row" onClick={async () => { await apiRequest(`${API_BASE}/items/${item.id}`).then(d => { setSelectedItem(d.item); setShowDetail(true); }); }}>
+                            <div className="lv-col col-img">
+                              {item.image_data ? <img src={item.image_data} alt={item.name} /> : <div className="lv-img-placeholder">N</div>}
+                            </div>
+                            <div className="lv-col col-name">
+                              <div className="lv-name-wrap">
+                                <div className="lv-name-text">{item.series_name || item.name}</div>
+                                <div className="item-meta-group inline">
+                                  {item.is_private && <span className="private-badge mini">🔒 私密</span>}
+                                  {item.category === "书籍" && (item.book_volumes || []).length > 0 && (() => {
+                                    const owned = item.book_volumes.filter(v => v.purchase_status === "owned").length, total = item.book_volumes.length;
+                                    return (
+                                      <div className="inline-progress">
+                                        <div className="progress-bar-bg"><div className="progress-bar-fill" style={{ width: `${(owned/total)*100}%` }}></div></div>
+                                        <span className="progress-text">{owned}/{total}</span>
+                                      </div>
+                                    );
+                                  })()}
+                                </div>
+                              </div>
+                            </div>
+                            <div className="lv-col col-tags">
+                              {item.tags?.length > 0 ? item.tags.slice(0, 2).map((t, i) => <span key={i} className="item-tag-sm">{t}</span>) : "-"}
+                            </div>
+                            <div className="lv-col col-price"><strong>{fmtMoney(item.category === "书籍" ? item.total_spent_cny : item.purchase_price)}</strong></div>
+                            <div className="lv-col col-list">{fmtMoney(getItemListPriceForDisplay(item))}</div>
+                            <div className="lv-col col-diff">
+                              {(() => {
+                                const diff = getItemProfitEstimate(item);
+                                return diff === null ? "-" : <span className={diff >= 0 ? "diff-positive" : "diff-negative"}>{fmtSignedMoney(diff)}</span>;
                               })()}
                             </div>
+                            <div className="lv-col col-status"><span className={`status-pill small ${statusClass(item.status)}`}>{statusLabel(item.status)}</span></div>
                           </div>
-                        </div>
-                        <div className="lv-col col-tags">
-                          {item.tags?.length > 0 ? item.tags.slice(0, 2).map((t, i) => <span key={i} className="item-tag-sm">{t}</span>) : "-"}
-                        </div>
-                        <div className="lv-col col-price"><strong>{fmtMoney(item.category === "书籍" ? item.total_spent_cny : item.purchase_price)}</strong></div>
-                        <div className="lv-col col-list">{fmtMoney(getItemListPriceForDisplay(item))}</div>
-                        <div className="lv-col col-diff">
-                          {(() => {
-                            const diff = getItemProfitEstimate(item);
-                            return diff === null ? "-" : <span className={diff >= 0 ? "diff-positive" : "diff-negative"}>{fmtSignedMoney(diff)}</span>;
-                          })()}
-                        </div>
-                        <div className="lv-col col-status"><span className={`status-pill small ${statusClass(item.status)}`}>{statusLabel(item.status)}</span></div>
+                        ))}
                       </div>
-                    ))}
-                  </div>
-                )
-              )}
-            </div>
-          </div>
-        </section>
-      </main>
+                    )
+                  )}
+                </div>
+              </div>
+            </section>
+          </main>
 
-      <div className="fab-group">
-        <button className="fab secondary" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}>↑</button>
-        <button className="fab secondary" onClick={() => setIsDarkMode(!isDarkMode)}>{isDarkMode ? "☀️" : "🌙"}</button>
-        <button className="fab" onClick={() => { if (!loggedIn) setShowLogin(true); else { setEditingItemId(null); setItemForm(initialItemForm()); setBookVolumesDraft([]); setTagInputValue(""); setShowItem(true); } }}>+</button>
-      </div>
+          <div className="fab-group">
+            <button className="fab secondary" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}>↑</button>
+            <button className="fab secondary" onClick={() => setIsDarkMode(!isDarkMode)}>{isDarkMode ? "☀️" : "🌙"}</button>
+            <button className="fab" onClick={() => { if (!loggedIn) setShowLogin(true); else { setEditingItemId(null); setItemForm(initialItemForm()); setBookVolumesDraft([]); setTagInputValue(""); setShowItem(true); } }}>+</button>
+          </div>
+        </>
+      )}
 
       {showStats && (
         <div className="modal" onMouseDown={e => e.target === e.currentTarget && setShowStats(false)}>
@@ -1471,55 +1730,13 @@ function App() {
         <div className="modal" onMouseDown={e => e.target === e.currentTarget && setShowLogin(false)}>
           <div className="modal-card small" onMouseDown={e => e.stopPropagation()}>
             <div className="modal-head"><h3>登录</h3><button className="icon-btn" onClick={() => setShowLogin(false)}>×</button></div>
-            <form className="form-grid one-col" onSubmit={async e => { 
-              e.preventDefault(); 
-              try { 
-                const d = await apiRequest(`${API_BASE}/login`, { method: "POST", body: JSON.stringify({ password: loginForm.password }) }); 
-                setToken(d.token); 
-                setUser(d.user); 
-                localStorage.setItem("neko_token", d.token); 
-                if (loginForm.remember) {
-                  localStorage.setItem("neko_remembered_password", loginForm.password);
-                } else {
-                  localStorage.removeItem("neko_remembered_password");
-                }
-                setShowLogin(false); 
-                setShowPassword(false);
-                if (!loginForm.remember) setLoginForm({ ...loginForm, password: "" }); 
-              } catch (e) { 
-                notify(e.message, "错误", "error"); 
-              } 
-            }}>
-              <label style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-                <span style={{ fontWeight: 700, fontSize: "0.95rem" }}>密码</span>
-                <div className="password-input-wrap">
-                  <input 
-                    type={showPassword ? "text" : "password"} 
-                    value={loginForm.password} 
-                    onChange={e => setLoginForm({ ...loginForm, password: e.target.value })} 
-                    required 
-                    placeholder="请输入管理员密码"
-                  />
-                  <button 
-                    type="button" 
-                    className="password-toggle-btn"
-                    onClick={() => setShowPassword(!showPassword)}
-                    tabIndex="-1"
-                  >
-                    {showPassword ? <div className="eye-icon"></div> : <div className="eye-off-icon"></div>}
-                  </button>
-                </div>
-              </label>
-              <div style={{ marginTop: "0.5rem", width: "100%", display: "flex", justifyContent: "flex-start" }}>
-                <label className="checkbox-group" style={{ margin: 0 }}>
-                  <input type="checkbox" checked={loginForm.remember} onChange={e => setLoginForm({ ...loginForm, remember: e.target.checked })} />
-                  <span>记住密码</span>
-                </label>
-              </div>
-              <div className="form-actions" style={{ marginTop: "1.5rem", width: "100%" }}>
-                <button type="submit" className="btn primary" style={{ width: "100%", height: "3.25rem", fontSize: "1.1rem", borderRadius: "14px" }}>登录</button>
-              </div>
-            </form>
+            <LoginFormPanel
+              loginForm={loginForm}
+              setLoginForm={setLoginForm}
+              showPassword={showPassword}
+              setShowPassword={setShowPassword}
+              onSubmit={handleLoginSubmit}
+            />
           </div>
         </div>
       )}
@@ -1531,10 +1748,10 @@ function App() {
             <form onSubmit={handleSubmitItem}>
               <div className="form-with-image">
                 <div className="form-image-col">
-                  <div className="image-preview-3-4" onClick={() => triggerLightbox(itemForm.image_data)} style={{cursor: itemForm.image_data ? 'zoom-in' : 'default'}}>
-                    {itemForm.image_data ? <img src={itemForm.image_data} alt="preview" /> : <span>📷</span>}
+                  <div className="image-preview-3-4 upload-preview" onClick={() => triggerLightbox(itemForm.image_data)} style={{cursor: itemForm.image_data ? 'zoom-in' : 'pointer'}}>
+                    {itemForm.image_data ? <img src={itemForm.image_data} alt="preview" /> : <><span>📷</span><span className="upload-hint">点击上传</span></>}
+                    {!itemForm.image_data && <input type="file" accept="image/*" aria-label="上传图片" onChange={async e => { if (e.target.files?.[0]) setItemForm({ ...itemForm, image_data: await fileToDataUrl(e.target.files[0]) }); }} />}
                   </div>
-                  <div className="file-input-wrapper"><button type="button" className="btn ghost small" style={{ width: "100%" }}>上传图片</button><input type="file" accept="image/*" onChange={async e => { if (e.target.files?.[0]) setItemForm({ ...itemForm, image_data: await fileToDataUrl(e.target.files[0]) }); }} /></div>
                   <div style={{ display: "flex", gap: "0.25rem", marginTop: "0.5rem" }}>
                     <input type="text" placeholder="图片链接..." value={imageUrlInput} onChange={e => setImageUrlInput(e.target.value)} style={{ flex: 1, fontSize: "0.8rem", padding: "0.25rem", borderRadius: "4px", border: "1px solid var(--line)", background: "var(--surface)" }} />
                     <button type="button" className="btn ghost small" onClick={() => handleDownloadImage(imageUrlInput, "item")}>下载</button>
@@ -1671,10 +1888,9 @@ function App() {
                   {/* 日期与标签并列 */}
                   {!(itemForm.category === "书籍" && itemForm.is_series) && itemForm.status !== "wishlist" ? (
                     <label>购买日期 (必填)
-                      <input
-                        type="date"
+                      <DatePickerInput
                         value={itemForm.purchase_date}
-                        onChange={e => setItemForm({ ...itemForm, purchase_date: e.target.value })}
+                        onChange={date => setItemForm({ ...itemForm, purchase_date: date })}
                         required={itemForm.status === "owned" || itemForm.status === "preorder"}
                       />
                     </label>
@@ -1887,10 +2103,10 @@ function App() {
             <form onSubmit={handleSubmitVolume}>
               <div className="form-with-image">
                 <div className="form-image-col">
-                  <div className="image-preview-3-4" onClick={() => triggerLightbox(volumeForm.cover_image_data)} style={{cursor: volumeForm.cover_image_data ? 'zoom-in' : 'default'}}>
-                    {volumeForm.cover_image_data ? <img src={volumeForm.cover_image_data} alt="preview" /> : <span>📷</span>}
+                  <div className="image-preview-3-4 upload-preview" onClick={() => triggerLightbox(volumeForm.cover_image_data)} style={{cursor: volumeForm.cover_image_data ? 'zoom-in' : 'pointer'}}>
+                    {volumeForm.cover_image_data ? <img src={volumeForm.cover_image_data} alt="preview" /> : <><span>📷</span><span className="upload-hint">点击上传</span></>}
+                    {!volumeForm.cover_image_data && <input type="file" accept="image/*" aria-label="上传封面" onChange={async e => { if (e.target.files?.[0]) setVolumeForm({ ...volumeForm, cover_image_data: await fileToDataUrl(e.target.files[0]) }); }} />}
                   </div>
-                  <div className="file-input-wrapper"><button type="button" className="btn ghost small" style={{ width: "100%" }}>封面</button><input type="file" accept="image/*" onChange={async e => { if (e.target.files?.[0]) setVolumeForm({ ...volumeForm, cover_image_data: await fileToDataUrl(e.target.files[0]) }); }} /></div>
                   <div style={{ display: "flex", gap: "0.25rem", marginTop: "0.5rem" }}>
                     <input type="text" placeholder="图片链接..." value={volumeImageUrlInput} onChange={e => setVolumeImageUrlInput(e.target.value)} style={{ flex: 1, fontSize: "0.8rem", padding: "0.25rem", borderRadius: "4px", border: "1px solid var(--line)", background: "var(--surface)" }} />
                     <button type="button" className="btn ghost small" onClick={() => handleDownloadImage(volumeImageUrlInput, "volume")}>下载</button>
@@ -1960,10 +2176,9 @@ function App() {
                   </div>
                   {volumeForm.purchase_status !== "wishlist" && (
                     <label className="full">购买日期 (必填)
-                      <input
-                        type="date"
+                      <DatePickerInput
                         value={volumeForm.purchase_date}
-                        onChange={e => setVolumeForm({ ...volumeForm, purchase_date: e.target.value })}
+                        onChange={date => setVolumeForm({ ...volumeForm, purchase_date: date })}
                         required={volumeForm.purchase_status === "owned" || volumeForm.purchase_status === "preorder"}
                       />
                     </label>
@@ -2020,3 +2235,4 @@ function App() {
   );
 }
 createRoot(document.getElementById("root")).render(<App />);
+

@@ -365,6 +365,7 @@ def init_db(admin_password=None) -> None:
             )
         migrate_inline_images(conn)
         compact_stored_dates(conn)
+        cleanup_stored_notes(conn)
 
 
 def image_extension_for_mime(content_type: str) -> str:
@@ -453,6 +454,15 @@ def compact_date_text(value):
     return text[:10]
 
 
+def normalize_notes_text(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() == "none":
+        return None
+    return text
+
+
 def compact_stored_dates(conn: sqlite3.Connection) -> None:
     for table, columns in {
         "collections": [
@@ -492,6 +502,39 @@ def compact_stored_dates(conn: sqlite3.Connection) -> None:
                 if compacted != next_volume.get(key):
                     next_volume[key] = compacted
                     changed = True
+            normalized.append(next_volume)
+
+        if changed:
+            conn.execute(
+                "UPDATE collections SET book_volumes_json=? WHERE id=?",
+                (json.dumps(normalized, ensure_ascii=False), row["id"]),
+            )
+
+
+def cleanup_stored_notes(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "UPDATE collections SET notes=NULL WHERE notes IS NOT NULL AND (trim(notes)='' OR lower(trim(notes))='none')"
+    )
+
+    rows = conn.execute("SELECT id, book_volumes_json FROM collections WHERE book_volumes_json IS NOT NULL").fetchall()
+    for row in rows:
+        raw = row["book_volumes_json"]
+        try:
+            volumes = json.loads(raw) if raw else []
+        except json.JSONDecodeError:
+            continue
+
+        changed = False
+        normalized = []
+        for volume in volumes:
+            if not isinstance(volume, dict):
+                normalized.append(volume)
+                continue
+            next_volume = dict(volume)
+            normalized_notes = normalize_notes_text(next_volume.get("notes"))
+            if normalized_notes != next_volume.get("notes"):
+                next_volume["notes"] = normalized_notes
+                changed = True
             normalized.append(next_volume)
 
         if changed:
@@ -592,7 +635,7 @@ def normalize_book_volumes(payload_volumes, rates_map, existing_volumes):
             "list_fx_rate_to_cny": lp_rate,
             "list_fx_rate_timestamp": lp_ts,
             "purchase_date": compact_date_text(raw.get("purchase_date")),
-            "notes": str(raw.get("notes", "")).strip() or None,
+            "notes": normalize_notes_text(raw.get("notes")),
             "sort_order": idx,
         })
     return out
@@ -643,7 +686,7 @@ def normalize_item_payload(payload: dict, rates_map: dict, existing_item=None) -
         "list_price_currency": list_price_currency, "list_price_cny": list_price_cny,
         "list_fx_rate_to_cny": list_rate, "list_fx_rate_timestamp": list_ts,
         "book_edition_type": book_edition_type, "purchase_date": compact_date_text(payload.get("purchase_date")),
-        "tags": tags_text, "notes": str(payload.get("notes", "")).strip() or None,
+        "tags": tags_text, "notes": normalize_notes_text(payload.get("notes")),
         "image_data": normalize_image_reference(payload.get("image_data", None), existing_item.get("image_data")),
         "book_volumes_json": book_volumes_json, "sort_order": sort_order,
         "author": str(payload.get("author", "")).strip() or None,
@@ -657,6 +700,16 @@ def row_to_item(row: sqlite3.Row) -> dict:
     tags = [part.strip() for part in (row["tags"] or "").split(",") if part.strip()]
     text = row["book_volumes_json"]
     vols = json.loads(text) if text else []
+    if isinstance(vols, list):
+        normalized_vols = []
+        for volume in vols:
+            if not isinstance(volume, dict):
+                normalized_vols.append(volume)
+                continue
+            next_volume = dict(volume)
+            next_volume["notes"] = normalize_notes_text(next_volume.get("notes"))
+            normalized_vols.append(next_volume)
+        vols = normalized_vols
     
     status = row["status"]
     if row["category"] == "书籍" and row["is_series"] and vols:
@@ -687,7 +740,7 @@ def row_to_item(row: sqlite3.Row) -> dict:
         "list_price_cny": row["list_price_cny"], "list_fx_rate_to_cny": row["list_fx_rate_to_cny"],
         "list_fx_rate_timestamp": row["list_fx_rate_timestamp"],
         "book_edition_type": row["book_edition_type"], "author": row["author"], "publisher": row["publisher"],
-        "book_volumes": vols, "purchase_date": row["purchase_date"], "tags": tags, "notes": row["notes"],
+        "book_volumes": vols, "purchase_date": row["purchase_date"], "tags": tags, "notes": normalize_notes_text(row["notes"]),
         "image_data": row["image_data"], "sort_order": row["sort_order"],
         "created_at": row["created_at"], "updated_at": row["updated_at"],
         "total_spent_cny": round(total, 2), "volume_count": len(vols),

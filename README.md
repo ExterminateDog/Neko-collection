@@ -11,6 +11,18 @@
 
 ---
 
+## 🖼️ 系统预览
+
+<p align="center">
+  <img src="images/1.png" alt="Neko Collection 首页展示" width="880">
+</p>
+
+<p align="center">
+  <img src="images/2.png" alt="Neko Collection 收藏品详情与管理界面" width="880">
+</p>
+
+---
+
 ## ✨ 主要功能
 
 - 🎨 **现代化界面**：采用响应式设计，支持导航栏切换“收藏”与“统计”双视图。
