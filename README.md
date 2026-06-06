@@ -1,7 +1,7 @@
 # Neko Collection
 
 <p align="center">
-  <img src="frontend/assets/logo.png" alt="Neko Collection Logo" width="120">
+  <img src="frontend/assets/logo.png" alt="Neko Collection Logo" width="180">
 </p>
 
 [![Version](https://img.shields.io/badge/version-1.5.0-blue.svg)](https://github.com/your-username/neko-collection)

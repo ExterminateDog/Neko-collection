@@ -190,17 +190,18 @@ body.dark-mode .entry-card {
 }
 
 .entry-brand {
-  margin: 0 0 1.75rem;
+  margin: 0 0 2rem;
 }
 
 .entry-brand .brand-logo {
-  width: 72px;
-  height: 72px;
+  width: 144px;
+  height: 144px;
   border-radius: 18px;
 }
 
 .entry-brand.centered {
   justify-content: center;
+  width: 100%;
 }
 
 .entry-actions {

@@ -1184,7 +1184,6 @@ function App() {
           <section className="entry-card">
             <div className="brand entry-brand centered">
               <img className="brand-logo" src="assets/logo.png" alt="logo" />
-              <h1 className="brand-overline">Neko Collection</h1>
             </div>
             {loggedIn ? (
               <>
